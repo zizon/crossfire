@@ -73,16 +73,16 @@ public class NameNodeServicePlugin implements ServicePlugin, Reconfigurable {
             this.schedule(() -> {
                 LOGGER.info("trigger NamenodeServicePlugin configuration reload...");
                 StreamSupport.stream(new HdfsConfiguration().spliterator(), true)
-                    .filter((entry) -> this.isPropertyReconfigurable(entry.getKey()))
-                    .filter((entry) -> {// find new config value
-                            return Optional.ofNullable(configuration.get(entry.getKey(), null))
-                                // filter changed
-                                .map((old) -> old.compareTo(entry.getValue()) != 0)
-                                // if not presented?
-                                .orElse(Objects.nonNull(entry.getValue()));
-                        }
-                    )
-                    .forEach((entry) -> this.reconfigureProperty(entry.getKey(), entry.getValue()));
+                        .filter((entry) -> this.isPropertyReconfigurable(entry.getKey()))
+                        .filter((entry) -> {// find new config value
+                                    return Optional.ofNullable(configuration.get(entry.getKey(), null))
+                                            // filter changed
+                                            .map((old) -> old.compareTo(entry.getValue()) != 0)
+                                            // if not presented?
+                                            .orElse(Objects.nonNull(entry.getValue()));
+                                }
+                        )
+                        .forEach((entry) -> this.reconfigureProperty(entry.getKey(), entry.getValue()));
             });
 
             return true;
@@ -135,16 +135,21 @@ public class NameNodeServicePlugin implements ServicePlugin, Reconfigurable {
 
     protected void cancelAll() {
         // cancel all
-        while (Optional.ofNullable(scheduling.poll())
-            .map((scheudled) -> {
-                scheudled.cancel(true);
-                return true;
-            }).orElse(false)) {
+        for (; ; ) {
+            boolean more = Optional.ofNullable(scheduling.poll())
+                    .map((scheudled) -> {
+                        scheudled.cancel(true);
+                        return true;
+                    }).orElse(false);
+
+            if (!more) {
+                break;
+            }
         }
     }
 
     protected Promise<?> schedule(Promise.PromiseRunnable runnable) {
-        Promise<?> scheduled = Promise.period(runnable, TimeUnit.SECONDS.toMillis(5));
+        Promise<?> scheduled = Promise.period(runnable, TimeUnit.MINUTES.toMillis(1));
 
         // marked
         scheduling.offer(scheduled);
