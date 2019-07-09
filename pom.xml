@@ -6,7 +6,7 @@
 
     <groupId>com.fs.bdp</groupId>
     <artifactId>crossfire</artifactId>
-    <version>0.0.1-SNAPSHOT</version>
+    <version>0.0.3-SNAPSHOT</version>
 
     <properties>
         <hadoop-version>2.7.3</hadoop-version>
@@ -60,6 +60,12 @@
         <dependency>
             <groupId>org.apache.hadoop</groupId>
             <artifactId>hadoop-common</artifactId>
+            <version>${hadoop-version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-yarn-common</artifactId>
             <version>${hadoop-version}</version>
         </dependency>
 

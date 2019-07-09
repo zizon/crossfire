@@ -3,6 +3,7 @@ package com.sf.hadoop;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeManager;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -16,12 +17,14 @@ import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-public class TestActiveZoneDNSToSwitchMapping {
+public class TestDNSToSwitchMappingReloadServicePlugin {
 
-    public static Log LOGGER = LogFactory.getLog(TestActiveZoneDNSToSwitchMapping.class);
+    public static Log LOGGER = LogFactory.getLog(TestDNSToSwitchMappingReloadServicePlugin.class);
 
     protected static Path RACK_DATA = Paths.get("rack.data");
     protected static List<String> TEST_SET = Stream.of(
@@ -70,10 +73,11 @@ public class TestActiveZoneDNSToSwitchMapping {
     @Test
     public void test() throws Throwable {
         Configuration configuration = new Configuration();
-        configuration.set(ActiveZoneDNSToSwitchMapping.TOPOLOGY_FILE, RACK_DATA.toUri().toString());
+        //configuration.set(DNSToSwitchMappingReloadServicePlugin.TOPOLOGY_FILE, RACK_DATA.toUri().toURL().toExternalForm());
 
-        ActiveZoneDNSToSwitchMapping mapping = new ActiveZoneDNSToSwitchMapping();
+        DNSToSwitchMappingReloadServicePlugin mapping = new DNSToSwitchMappingReloadServicePlugin(TimeUnit.SECONDS.toMillis(5));
         mapping.setConf(configuration);
+        mapping.start(null);
 
         Arrays.stream(new String[]{
                 "10.116.100.1",
@@ -82,8 +86,11 @@ public class TestActiveZoneDNSToSwitchMapping {
                 "cnsz17pl1784",
                 "10.116.100.7"
         }).forEach((ip) -> {
-            LOGGER.info("resolving " + ip + " to:" + mapping.resolve(Collections.singletonList(ip)));
+            //LOGGER.info("resolving " + ip + " to:" + mapping.resolve(Collections.singletonList(ip)));
         });
 
+        LOGGER.info( DatanodeManager.class.getDeclaredField("dnsToSwitchMapping"));
+        //LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(15));
+        mapping.stop();
     }
 }
