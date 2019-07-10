@@ -6,7 +6,7 @@
 
     <groupId>com.fs.bdp</groupId>
     <artifactId>crossfire</artifactId>
-    <version>0.0.4-SNAPSHOT</version>
+    <version>0.0.5-SNAPSHOT</version>
 
     <properties>
         <hadoop-version>2.7.3</hadoop-version>
