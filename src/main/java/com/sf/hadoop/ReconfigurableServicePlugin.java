@@ -1,20 +1,26 @@
 package com.sf.hadoop;
 
-import com.fs.misc.Promise;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.conf.Reconfigurable;
+import org.apache.hadoop.conf.ReconfigurationException;
+import org.apache.hadoop.conf.ReconfigurationServlet;
+import org.apache.hadoop.http.HttpServer2;
 import org.apache.hadoop.util.ServicePlugin;
 
+import java.util.Collection;
 import java.util.Collections;
 import java.util.NavigableSet;
-import java.util.Optional;
 import java.util.concurrent.ConcurrentSkipListSet;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
-public abstract class ReconfigurableServicePlugin implements Configurable, ServicePlugin {
+public abstract class ReconfigurableServicePlugin implements Reconfigurable, ServicePlugin {
 
     public static final Log LOGGER = LogFactory.getLog(ReconfigurableServicePlugin.class);
+
+    public static final String RECONFIGURATION_KEY = "reconfig";
 
     public static class ChangeSet {
 
@@ -63,23 +69,35 @@ public abstract class ReconfigurableServicePlugin implements Configurable, Servi
             }
             return modified_keys;
         }
+
+        public boolean didChanged(String key) {
+            return Stream.of(
+                    modified_keys,
+                    removed_keys,
+                    added_keys
+            ).parallel()
+                    .anyMatch((keys) -> keys != null && keys.contains(key));
+        }
+
+        @Override
+        public String toString() {
+            return "added:(" + addedSet().parallelStream().collect(Collectors.joining(",")) + ")"
+                    + "removed:(" + removedSet().parallelStream().collect(Collectors.joining(",")) + ")"
+                    + "modified:(" + modifiedSet().parallelStream().collect(Collectors.joining(",")) + ")"
+                    ;
+        }
     }
 
     protected Object service;
-    protected Promise<?> scheduling;
     protected Configuration configuration;
-    protected final NavigableSet<String> listening_property;
-    protected long reload_interval;
-
-    public ReconfigurableServicePlugin(NavigableSet<String> listening_propert, long reload_interval) {
-        super();
-        this.listening_property = Optional.ofNullable(listening_propert).orElseGet(ConcurrentSkipListSet::new);
-        this.reload_interval = reload_interval;
-    }
+    protected HttpServer2 http;
 
     @Override
     public void setConf(Configuration conf) {
         this.configuration = conf;
+
+        // plug flag
+        this.configuration.setBoolean(RECONFIGURATION_KEY, false);
     }
 
     @Override
@@ -89,18 +107,29 @@ public abstract class ReconfigurableServicePlugin implements Configurable, Servi
 
     @Override
     public void start(Object service) {
-        LOGGER.info("start service plugin:" + this + " for service:" + service);
-        this.cancel();
         this.service = service;
-        this.scheduling = Promise.period(this::maybeReconfigurate, this.reload_interval);
+        try {
+            this.http = findHttpServer();
+            LOGGER.info("plugin find httpserver:" + http);
+        } catch (Throwable throwable) {
+            throw new RuntimeException("fail to find http server for:" + this, throwable);
+        }
+
+        String name = name();
+        String path = "/" + name;
+        http.addServlet(name, path, ReconfigurationServlet.class);
+        http.setAttribute(ReconfigurationServlet.CONF_SERVLET_RECONFIGURABLE_PREFIX + path, this);
+
+        LOGGER.info("plug reconfig servlet with name:" + name
+                + " path:" + path
+                + " attribute:" + this
+                + "(" + ReconfigurationServlet.CONF_SERVLET_RECONFIGURABLE_PREFIX + path + ")"
+        );
     }
 
     @Override
     public void stop() {
-        LOGGER.info("stop service plugin:" + this + " of service:" + service());
-        this.cancel();
-        this.scheduling = null;
-        this.service = null;
+        LOGGER.warn("no action for stop");
     }
 
     @Override
@@ -108,55 +137,39 @@ public abstract class ReconfigurableServicePlugin implements Configurable, Servi
         this.stop();
     }
 
+    @Override
+    public boolean isPropertyReconfigurable(String property) {
+        return RECONFIGURATION_KEY.equals(property);
+    }
+
+    @Override
+    public Collection<String> getReconfigurableProperties() {
+        return Collections.singleton(RECONFIGURATION_KEY);
+    }
+
+    @Override
+    public String reconfigureProperty(String property, String new_value) throws ReconfigurationException {
+        try {
+            LOGGER.info("trigger reconfig, property:" + property + " old:" + getConf().get(property) + " new:" + new_value);
+            this.doReconfigurate();
+            return null;
+        } catch (Throwable throwable) {
+            throw new ReconfigurationException("fail to reconfigrate:" + property, "false", new_value, throwable);
+        }
+    }
+
+    protected abstract void doReconfigurate() throws Throwable;
+
+    protected abstract String name();
+
+    protected abstract HttpServer2 findHttpServer() throws Throwable;
+
+    protected HttpServer2 http() {
+        return http;
+    }
+
     protected Object service() {
         return service;
     }
 
-    protected void cancel() {
-        Optional.ofNullable(this.scheduling)
-                .ifPresent((promise) -> promise.cancel(true));
-    }
-
-    protected void changeInterval(long period) {
-        this.stop();
-        this.reload_interval = period;
-        this.start(service());
-    }
-
-    protected abstract void notifyChangeSet(Configuration old_config, Configuration new_config, ChangeSet changeset);
-
-    protected void maybeReconfigurate() {
-        // find current
-        Configuration current = this.getConf();
-
-        // load new
-        Configuration maybe_new = new Configuration(current);
-        maybe_new.reloadConfiguration();
-
-        ChangeSet changeset = new ChangeSet();
-        this.listening_property.parallelStream()
-                .forEach((property) -> {
-                    String old_value = current.get(property, null);
-                    String new_value = maybe_new.get(property, null);
-
-                    if (old_value == null) {
-                        if (new_value != null) {
-                            changeset.added(property);
-                        }
-
-                        // not changed
-                    } else if (new_value == null) {
-                        // remove
-                        changeset.removed(property);
-                    } else if (old_value.compareTo(new_value) != 0) {
-                        changeset.modified(property);
-                    }
-                });
-
-        // update new config
-        this.setConf(maybe_new);
-
-        // do notify
-        this.notifyChangeSet(current, maybe_new, changeset);
-    }
 }
