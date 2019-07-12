@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Reconfigurate</title>
+    <style>
+        table {
+                width: 100%;
+                text-transform: lowercase;
+            }
+        #apply {
+            display: block;
+            margin: 1% auto 1% auto;
+        }
+    </style>
+    <script type="text/javascript" defer>
+            document.addEventListener("DOMContentLoaded",(event) => {
+                let table=__JSON_TEMPLATE__;
+                // repalce
+                function render(table) {
+                    document.querySelector('#table-container')
+                        .innerHTML=table.map(
+                            (row)=>"<tr>"+row.map(
+                                (cell)=>"<td>"+cell+"</td>"
+                                ).join('')+"</tr>"
+                        ).join('');
+                }
+
+                render(table);
+
+                // attach click
+                document.querySelector("#apply").addEventListener('click',(event) => {
+                        event.target.disabled = true;
+                        let path="__RECONFIG_PATH__";
+                        fetch(path+"?reload=true&format=json")
+                            .then((response)=>response.json())
+                            .then(render)
+                            .finally(()=>event.target.disabled=false)
+                    })
+
+            });
+    </script>
+</head>
+<body>
+    <button id="apply">refresh</button>
+        <table border='1'>
+            <tbody id='table-container'>
+            </tbody>
+        </table>
+    </body>
+</html>

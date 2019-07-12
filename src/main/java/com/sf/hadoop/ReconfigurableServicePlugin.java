@@ -1,108 +1,110 @@
 package com.sf.hadoop;
 
+import com.google.gson.GsonBuilder;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.conf.Reconfigurable;
-import org.apache.hadoop.conf.ReconfigurationException;
-import org.apache.hadoop.conf.ReconfigurationServlet;
 import org.apache.hadoop.http.HttpServer2;
 import org.apache.hadoop.util.ServicePlugin;
 
-import java.util.Collection;
-import java.util.Collections;
-import java.util.NavigableSet;
-import java.util.concurrent.ConcurrentSkipListSet;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
+import javax.servlet.http.HttpServlet;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.Channels;
+import java.nio.channels.ReadableByteChannel;
+import java.util.List;
+import java.util.Optional;
 
-public abstract class ReconfigurableServicePlugin implements Reconfigurable, ServicePlugin {
+public abstract class ReconfigurableServicePlugin implements ServicePlugin {
 
     public static final Log LOGGER = LogFactory.getLog(ReconfigurableServicePlugin.class);
 
     public static final String RECONFIGURATION_KEY = "reconfig";
 
-    public static class ChangeSet {
+    public static final String TEMPLATE_NAME = "reconfigurate_plugin.html";
 
-        protected NavigableSet<String> removed_keys;
-        protected NavigableSet<String> added_keys;
-        protected NavigableSet<String> modified_keys;
+    public static class ReloadableServlet extends HttpServlet {
 
-        public void removed(String key) {
-            if (removed_keys == null) {
-                this.removed_keys = new ConcurrentSkipListSet<>();
-            }
-            this.removed_keys.add(key);
-        }
-
-        public void added(String key) {
-            if (this.added_keys == null) {
-                this.added_keys = new ConcurrentSkipListSet<>();
-            }
-            this.added_keys.add(key);
-        }
-
-        public void modified(String key) {
-            if (this.modified_keys == null) {
-                this.modified_keys = new ConcurrentSkipListSet<>();
-            }
-            this.modified_keys.add(key);
-        }
-
-        public NavigableSet<String> removedSet() {
-            if (removed_keys == null) {
-                return Collections.emptyNavigableSet();
-            }
-            return removed_keys;
-        }
-
-        public NavigableSet<String> addedSet() {
-            if (added_keys == null) {
-                return Collections.emptyNavigableSet();
-            }
-            return added_keys;
-        }
-
-        public NavigableSet<String> modifiedSet() {
-            if (modified_keys == null) {
-                return Collections.emptyNavigableSet();
-            }
-            return modified_keys;
-        }
-
-        public boolean didChanged(String key) {
-            return Stream.of(
-                    modified_keys,
-                    removed_keys,
-                    added_keys
-            ).parallel()
-                    .anyMatch((keys) -> keys != null && keys.contains(key));
+        protected ReconfigurableServicePlugin plugin(HttpServletRequest request) {
+            String plugin_key = request.getServletPath().substring(1);
+            return (ReconfigurableServicePlugin) this.getServletContext()
+                    .getAttribute(contextPlugin(plugin_key));
         }
 
         @Override
-        public String toString() {
-            return "added:(" + addedSet().parallelStream().collect(Collectors.joining(",")) + ")"
-                    + "removed:(" + removedSet().parallelStream().collect(Collectors.joining(",")) + ")"
-                    + "modified:(" + modifiedSet().parallelStream().collect(Collectors.joining(",")) + ")"
-                    ;
+        protected void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
+            boolean reload = Optional.ofNullable(request.getParameter("reload"))
+                    .map(Boolean::parseBoolean)
+                    .orElse(false);
+
+            try {
+                ReconfigurableServicePlugin reconfigurable = plugin(request);
+                if (reload) {
+                    reconfigurable.doReconfigurate();
+                }
+
+                // check response style
+                boolean json = Optional.ofNullable(request.getParameter("format"))
+                        .orElse("html")
+                        .equalsIgnoreCase("json");
+
+                String content = new GsonBuilder()
+                        .setPrettyPrinting()
+                        .create()
+                        .toJson(reconfigurable.render());
+                if (json) {
+                    response.setContentType("application/json");
+                    response.getWriter().print(content);
+                    return;
+                }
+
+                // if api access
+                //reconfigurable.renderOk(response);
+                response.setContentType("text/html");
+                response.getWriter().print(
+                        loadTemplate()
+                                .replaceAll("__JSON_TEMPLATE__", content)
+                                .replaceAll("__RECONFIG_PATH__", request.getServletPath())
+                );
+            } catch (Throwable throwable) {
+                LOGGER.error("fail to precess reload for plugin:" + request.getContextPath(), throwable);
+                response.sendError(HttpServletResponse.SC_NOT_ACCEPTABLE, "plugin reload not accepted");
+            }
+
+            return;
         }
     }
 
     protected Object service;
-    protected Configuration configuration;
     protected HttpServer2 http;
 
-    @Override
-    public void setConf(Configuration conf) {
-        this.configuration = conf;
-
-        // plug flag
-        this.configuration.setBoolean(RECONFIGURATION_KEY, false);
+    protected static String contextPlugin(String name) {
+        return RECONFIGURATION_KEY + "/" + name;
     }
 
-    @Override
-    public Configuration getConf() {
-        return this.configuration;
+    protected static String loadTemplate() {
+        try (ReadableByteChannel channel = Channels.newChannel(
+                Thread.currentThread().getContextClassLoader().getResourceAsStream(TEMPLATE_NAME))
+        ) {
+            ByteBuffer content = ByteBuffer.allocate(4096);
+            while (channel.read(content) != -1) {
+                if (!content.hasRemaining()) {
+                    ByteBuffer copy = ByteBuffer.allocate(content.capacity() + 1024);
+                    content.flip();
+                    copy.put(content);
+                    content = copy;
+                }
+            }
+
+            // to read mode
+            content.flip();
+
+            return new String(content.array(), content.position(), content.limit());
+        } catch (Throwable e) {
+            throw new UncheckedIOException(new IOException("fail to load resource:" + TEMPLATE_NAME, e));
+        }
     }
 
     @Override
@@ -117,13 +119,15 @@ public abstract class ReconfigurableServicePlugin implements Reconfigurable, Ser
 
         String name = name();
         String path = "/" + name;
-        http.addServlet(name, path, ReconfigurationServlet.class);
-        http.setAttribute(ReconfigurationServlet.CONF_SERVLET_RECONFIGURABLE_PREFIX + path, this);
+
+        HttpServer2 http = http();
+        http.addServlet(name, path, ReloadableServlet.class);
+        http.setAttribute(contextPlugin(name), this);
 
         LOGGER.info("plug reconfig servlet with name:" + name
                 + " path:" + path
                 + " attribute:" + this
-                + "(" + ReconfigurationServlet.CONF_SERVLET_RECONFIGURABLE_PREFIX + path + ")"
+                + "(" + contextPlugin(name) + "=" + this + ")"
         );
     }
 
@@ -137,32 +141,13 @@ public abstract class ReconfigurableServicePlugin implements Reconfigurable, Ser
         this.stop();
     }
 
-    @Override
-    public boolean isPropertyReconfigurable(String property) {
-        return RECONFIGURATION_KEY.equals(property);
-    }
-
-    @Override
-    public Collection<String> getReconfigurableProperties() {
-        return Collections.singleton(RECONFIGURATION_KEY);
-    }
-
-    @Override
-    public String reconfigureProperty(String property, String new_value) throws ReconfigurationException {
-        try {
-            LOGGER.info("trigger reconfig, property:" + property + " old:" + getConf().get(property) + " new:" + new_value);
-            this.doReconfigurate();
-            return null;
-        } catch (Throwable throwable) {
-            throw new ReconfigurationException("fail to reconfigrate:" + property, "false", new_value, throwable);
-        }
-    }
-
     protected abstract void doReconfigurate() throws Throwable;
 
     protected abstract String name();
 
     protected abstract HttpServer2 findHttpServer() throws Throwable;
+
+    protected abstract List<List<String>> render();
 
     protected HttpServer2 http() {
         return http;
@@ -171,5 +156,4 @@ public abstract class ReconfigurableServicePlugin implements Reconfigurable, Ser
     protected Object service() {
         return service;
     }
-
 }

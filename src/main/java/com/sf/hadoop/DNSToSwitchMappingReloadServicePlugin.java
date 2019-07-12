@@ -18,60 +18,17 @@ import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.http.HttpServer2;
 import org.apache.hadoop.net.DNSToSwitchMapping;
 
-import javax.servlet.http.HttpServlet;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.lang.reflect.Field;
+import java.util.List;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public class DNSToSwitchMappingReloadServicePlugin extends ReconfigurableServicePlugin {
 
     public static final Log LOGGER = LogFactory.getLog(DNSToSwitchMappingReloadServicePlugin.class);
 
     protected DNSToSwitchMapping mapping;
-
-    public static class ResovleResultServlet extends HttpServlet {
-        @Override
-        protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
-            NameNode namenode = (NameNode) this.getServletContext().getAttribute(ResovleResultServlet.class.getName());
-            String rows = namenode.getNamesystem()
-                    .getBlockManager()
-                    .getDatanodeManager()
-                    .getDatanodeListForReport(HdfsConstants.DatanodeReportType.LIVE)
-                    .parallelStream()
-                    .map((datanode) -> {
-                        return "<tr>"
-                                + "<td>" + datanode.getIpAddr() + "</td>"
-                                + "<td>" + datanode.getHostName() + "</td>"
-                                + "<td>" + datanode.getNetworkLocation() + "</td>"
-                                + "</tr>";
-                    })
-                    .collect(Collectors.joining());
-
-            // out
-            resp.setContentType("text/html");
-            resp.getWriter().print("<!doctype html>"
-                    + "<html>"
-                    + " <head>"
-                    + "     <style>"
-                    + "         table {"
-                    + "             width: 100%;"
-                    + "             text-transform: lowercase;"
-                    + "         }"
-                    + "     </style>"
-                    + " </head>"
-                    + " <body>"
-                    + "     <table border='1'>"
-                    + "          <tbody>"
-                    + rows
-                    + "         </tbody>"
-                    + "     </table>"
-                    + " </body>"
-                    + "</html>");
-        }
-    }
-
 
     @Override
     public void start(Object service) {
@@ -89,11 +46,6 @@ public class DNSToSwitchMappingReloadServicePlugin extends ReconfigurableService
             } catch (NoSuchFieldException | IllegalAccessException e) {
                 LOGGER.warn("no dnsToSwitchMapping found for namendoe", e);
             }
-
-            // add resolve list servlet
-            HttpServer2 http = http();
-            http.setAttribute(ResovleResultServlet.class.getName(), namenode);
-            http.addServlet("rack-resolved", "/rack-resolved", ResovleResultServlet.class);
         }
     }
 
@@ -163,5 +115,23 @@ public class DNSToSwitchMappingReloadServicePlugin extends ReconfigurableService
         }
 
         throw new NullPointerException("can not find http server");
+    }
+
+    @Override
+    protected List<List<String>> render() {
+        NameNode namenode = (NameNode) service();
+        return namenode.getNamesystem()
+                .getBlockManager()
+                .getDatanodeManager()
+                .getDatanodeListForReport(HdfsConstants.DatanodeReportType.LIVE)
+                .parallelStream()
+                .map((datanode) ->
+                        Stream.of(
+                                datanode.getIpAddr(),
+                                datanode.getHostName(),
+                                datanode.getNetworkLocation()
+                        ).collect(Collectors.toList())
+                )
+                .collect(Collectors.toList());
     }
 }
