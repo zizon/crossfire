@@ -1,9 +1,12 @@
 package com.fs.misc;
 
+import jdk.nashorn.internal.runtime.options.Option;
+
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.Iterator;
+import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -67,7 +70,8 @@ public class LazyIterators {
 
         @Override
         public T next() {
-            T value = this.fetching.join().orElseThrow(() -> new NoSuchElementException("end of stream"));
+            T value = this.fetching.join()
+                    .orElseThrow(() -> new NoSuchElementException("end of stream"));
             fetching = prefetch();
             return value;
         }
@@ -154,6 +158,38 @@ public class LazyIterators {
             public T next() {
                 T value = resolved_value.orElseThrow(() -> new NoSuchElementException("end of iterator"));
                 resolved_value = resolveNext();
+                return value;
+            }
+        };
+    }
+
+    public static <T, CONTEXT> Iterator<T> generate(CONTEXT init_context,
+                                                    Promise.PromiseFunction<CONTEXT, Optional<T>> generator,
+                                                    Promise.PromiseBiFunction<CONTEXT, T, CONTEXT> context_update) {
+        return new Iterator<T>() {
+            protected CONTEXT _context = init_context;
+
+            protected Optional<T> resolved = resolveNext();
+
+            protected Optional<T> resolveNext() {
+                Optional<T> resovled_value = generator.apply(this._context);
+                if (resovled_value.isPresent()) {
+                    this._context = context_update.apply(this._context, resovled_value.get());
+                }
+                return resovled_value;
+            }
+
+
+            @Override
+            public boolean hasNext() {
+                return resolved.isPresent();
+            }
+
+            @Override
+            public T next() {
+                T value = resolved.orElseThrow(() -> new NoSuchElementException("end of iterator"));
+                resolved = resolveNext();
+
                 return value;
             }
         };
