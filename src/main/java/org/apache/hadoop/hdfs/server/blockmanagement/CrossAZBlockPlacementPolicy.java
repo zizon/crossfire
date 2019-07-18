@@ -13,20 +13,106 @@ import org.apache.hadoop.net.Node;
 
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.NavigableSet;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
 
     public static final Log LOGGER = LogFactory.getLog(CrossAZBlockPlacementPolicy.class);
+
+    public static class Optimizer {
+
+        public Map<Integer, NavigableSet<Node>> hierarchy(NavigableSet<Node> nodes) {
+            return nodes.stream()
+                    .flatMap((node) -> {
+                        Iterator<Node> iterator = LazyIterators.generate(
+                                node,
+                                Optional::ofNullable,
+                                (context, new_value) -> context.getParent()
+                        );
+                        return LazyIterators.stream(iterator);
+                    })
+                    .filter((node) -> node.getLevel() != 0)
+                    .collect(Collectors.groupingByConcurrent(
+                            Node::getLevel,
+                            Collectors.toCollection(CrossAZBlockPlacementPolicy::newNodeSet))
+                    );
+        }
+
+        public boolean isOptimal(NavigableSet<Node> nodes, int require_replica) {
+            switch (require_replica) {
+                case 0:
+                    // no rack needed
+                    return true;
+                case 1:
+                    // not empty rack is sufficient
+                    return !nodes.isEmpty();
+            }
+
+            Map<Integer, NavigableSet<Node>> hierarchy = hierarchy(nodes);
+
+            boolean not_satisfied = hierarchy.entrySet().stream()
+                    .map((entry) -> {
+                        NavigableSet<Node> same_level = entry.getValue();
+
+                        // at least two nodes require for each level
+                        if (same_level.size() < 2) {
+                            return false;
+                        }
+
+                        // cluster by parent
+                        ConcurrentMap<Node, List<Node>> cluster_by_parent = same_level.stream()
+                                .collect(Collectors.groupingByConcurrent(Node::getParent));
+
+                        // calculate expected load
+                        int total = same_level.size();
+                        int cluster = cluster_by_parent.size();
+                        int average_load = total / cluster;
+                        if (total % cluster != 0) {
+                            // perfect divided
+                            average_load += 1;
+                        }
+
+                        final int load_limit = average_load;
+                        // find overload?
+                        boolean overload = cluster_by_parent.values().stream()
+                                .map((children) -> children.size() <= load_limit)
+                                .anyMatch((satisfied) -> !satisfied);
+
+                        return !overload;
+                    }).anyMatch((satisfied) -> !satisfied);
+
+            if (LOGGER.isDebugEnabled()) {
+                LOGGER.debug("racks:["
+                        + hierarchy.entrySet().stream()
+                        .map((entry) -> {
+                            return "("
+                                    + entry.getKey() + " = "
+                                    + entry.getValue().stream().map(Node::toString)
+                                    .collect(Collectors.joining(","))
+                                    + ")";
+                        })
+                        .collect(Collectors.joining(","))
+                        + "]"
+                        + " require_replica:" + require_replica
+                        + " optimal:" + !not_satisfied
+                );
+            }
+
+            return !not_satisfied;
+        }
+    }
 
     protected static class CrossAZBlockBlockPlacementStatus implements BlockPlacementStatus {
 
@@ -65,10 +151,16 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
             .comparingInt(Node::getLevel)
             .thenComparing(Node::getName);
 
+    protected static <T extends Node> NavigableSet<T> newNodeSet() {
+        return new TreeSet<>(NODE_COMPARATOR);
+        //return new ConcurrentSkipListSet<>(NODE_COMPARATOR);
+    }
+
     protected Configuration configuration;
     protected FSClusterStats stats;
     protected NetworkTopology topology;
     protected Host2NodesMap mapping;
+    protected Optimizer optimizer;
 
     @Override
     public DatanodeStorageInfo[] chooseTarget(
@@ -92,6 +184,23 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
             DatanodeDescriptor addedNode,
             DatanodeDescriptor delNodeHint) {
         // TODO
+        int to_delete = candidates.size() - expectedNumOfReplicas;
+        if (to_delete <= 0) {
+            return Collections.emptyList();
+        }
+
+        // collect datanodes
+        NavigableSet<Node> datanodes = candidates.stream()
+                .map(DatanodeStorageInfo::getDatanodeDescriptor)
+                .collect(Collectors.toCollection(CrossAZBlockPlacementPolicy::newNodeSet));
+        if (!optimizer.isOptimal(datanodes, expectedNumOfReplicas)) {
+            // no even optimal placement
+            // remove nothing
+            return Collections.emptyList();
+        }
+
+        // placement ok,try find exceeded node
+        //TODO
         return null;
     }
 
@@ -128,8 +237,8 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                     + " for replication:" + require_replica);
         }
 
-        if (isOptimal(deduplicated.stream()
-                        .collect(Collectors.toCollection(() -> new TreeSet<>(NODE_COMPARATOR))),
+        if (this.optimizer.isOptimal(deduplicated.stream()
+                        .collect(Collectors.toCollection(() -> new ConcurrentSkipListSet<>(NODE_COMPARATOR))),
                 require_replica)) {
             return PLACEMENT_OK;
         }
@@ -147,84 +256,6 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
         );
     }
 
-    protected boolean isOptimal(NavigableSet<Node> racks, int require_replica) {
-        switch (require_replica) {
-            case 0:
-                // no rack needed
-                return true;
-            case 1:
-                // not empty rack is sufficient
-                return !racks.isEmpty();
-        }
-
-        ConcurrentMap<Integer, NavigableSet<Node>> leveled_nodes = racks.parallelStream()
-                .flatMap((node) -> {
-                    Iterator<Node> iterator = LazyIterators.generate(
-                            node,
-                            Optional::ofNullable,
-                            (context, new_value) -> {
-                                LOGGER.info("context:" + context + " value:" + new_value);
-                                return context.getParent();
-                            }
-                    );
-                    return LazyIterators.stream(iterator);
-                })
-                .filter((node) -> node.getLevel() != 0)
-                .collect(Collectors.groupingByConcurrent(
-                        Node::getLevel,
-                        Collectors.toCollection(() -> new TreeSet<>(NODE_COMPARATOR)))
-                );
-
-        boolean not_satisfied = leveled_nodes.entrySet().parallelStream()
-                .map((entry) -> {
-                    NavigableSet<Node> same_level = entry.getValue();
-
-                    // at least two nodes require for each level
-                    if (same_level.size() < 2) {
-                        return false;
-                    }
-
-                    // cluster by parent
-                    ConcurrentMap<Node, List<Node>> cluster_by_parent = same_level.parallelStream()
-                            .collect(Collectors.groupingByConcurrent(Node::getParent));
-
-                    // calculate expected load
-                    int total = same_level.size();
-                    int cluster = cluster_by_parent.size();
-                    int average_load = total / cluster;
-                    if (total % cluster != 0) {
-                        // perfect divided
-                        average_load += 1;
-                    }
-
-                    final int load_limit = average_load;
-                    // find overload?
-                    boolean overload = cluster_by_parent.values().parallelStream()
-                            .map((children) -> children.size() <= load_limit)
-                            .anyMatch((satisfied) -> !satisfied);
-
-                    return !overload;
-                }).anyMatch((satisfied) -> !satisfied);
-
-        if (LOGGER.isDebugEnabled()) {
-            LOGGER.debug("racks:["
-                    + leveled_nodes.entrySet().stream()
-                    .map((entry) -> {
-                        return "("
-                                + entry.getKey() + " = "
-                                + entry.getValue().stream().map(Node::toString)
-                                .collect(Collectors.joining(","))
-                                + ")";
-                    })
-                    .collect(Collectors.joining(","))
-                    + "]"
-                    + " require_replica:" + require_replica
-                    + " optimal:" + !not_satisfied
-            );
-        }
-        return !not_satisfied;
-    }
-
     @Override
     protected void initialize(Configuration configuration, FSClusterStats stats, NetworkTopology topology,
                               Host2NodesMap mapping) {
@@ -232,5 +263,6 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
         this.stats = stats;
         this.topology = topology;
         this.mapping = mapping;
+        this.optimizer = new Optimizer();
     }
 }

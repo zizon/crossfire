@@ -1,6 +1,5 @@
 package org.apache.hadoop.hdfs.server.blockmanagement;
 
-import com.google.common.collect.ImmutableMap;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
@@ -10,20 +9,15 @@ import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
-import java.util.AbstractMap;
-import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
-import java.util.stream.Stream;
 
 public class TestCrossAZBlockPlacementPolicy {
 
     public static final Log LOGGER = LogFactory.getLog(TestCrossAZBlockPlacementPolicy.class);
+
 
     protected List<DatanodeInfo> datanodes;
 
@@ -53,7 +47,7 @@ public class TestCrossAZBlockPlacementPolicy {
     }
 
     @Test
-    public void verifyBlockPlacement() {
+    public void testVerifyBlockPlacement() {
         BlockPlacementPolicy policy = new CrossAZBlockPlacementPolicy();
         NetworkTopology topology = new NetworkTopology();
         datanodes.forEach(topology::add);
@@ -75,7 +69,7 @@ public class TestCrossAZBlockPlacementPolicy {
         BlockPlacementStatus status = verify(policy, 3, datanodes.get(0));
         Assert.assertFalse("under replication" + status, status.isPlacementPolicySatisfied());
 
-        status = verify(policy, 3, null);
+        status = verify(policy, 3);
         Assert.assertFalse("null datanode" + status, status.isPlacementPolicySatisfied());
 
         //             root      --level 0
@@ -125,9 +119,8 @@ public class TestCrossAZBlockPlacementPolicy {
         //          even     odd    --level 1
         //        /\ \  \    / \
         //       2 12 22 32 1  11    --level 2
-        status = verify(policy, 5, odd_rack_1[0],odd_rack_1[1],even_rack_2[0],even_rack_2[1],even_rack_2[2],even_rack_2[3]);
+        status = verify(policy, 5, odd_rack_1[0], odd_rack_1[1], even_rack_2[0], even_rack_2[1], even_rack_2[2], even_rack_2[3]);
         Assert.assertFalse("not balanced distributed:" + status,
                 status.isPlacementPolicySatisfied());
-
     }
 }
