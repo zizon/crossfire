@@ -163,7 +163,7 @@ public class LazyIterators {
         };
     }
 
-    public static <T, CONTEXT> Iterator<T> generate(CONTEXT init_context,
+    public static <CONTEXT, T> Iterator<T> generate(CONTEXT init_context,
                                                     Promise.PromiseFunction<CONTEXT, Optional<T>> generator,
                                                     Promise.PromiseBiFunction<CONTEXT, T, CONTEXT> context_update) {
         return new Iterator<T>() {

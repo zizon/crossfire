@@ -4,7 +4,6 @@ package org.apache.hadoop.hdfs.server.blockmanagement;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.net.Node;
-import org.junit.Before;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Mode;
@@ -29,13 +28,13 @@ import java.util.stream.IntStream;
 @OutputTimeUnit(TimeUnit.SECONDS)
 public class BenchmarkOptimizer {
 
-    protected CrossAZBlockPlacementPolicy.Optimizer optimizer;
+    protected CrossAZBlockPlacementPolicy.Estimator estimator;
     protected List<DatanodeInfo> datanodes;
     protected NavigableSet<Node> nodes;
 
     @Setup
     public void setup() {
-        this.optimizer = new CrossAZBlockPlacementPolicy.Optimizer();
+        this.estimator = new CrossAZBlockPlacementPolicy.Estimator();
         this.datanodes = IntStream.range(1, 255)
                 .mapToObj((i) -> {
                     String datacenter = i % 2 == 0 ? "even" : "odd";
@@ -68,7 +67,7 @@ public class BenchmarkOptimizer {
 
     @Benchmark
     public void verfiy() {
-        optimizer.isOptimal(nodes, 5);
+        estimator.isOptimal(nodes, 5);
     }
 
     public static void main(String[] args) throws RunnerException {

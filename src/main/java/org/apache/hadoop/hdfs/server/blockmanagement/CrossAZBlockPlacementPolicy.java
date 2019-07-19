@@ -22,16 +22,17 @@ import java.util.NavigableSet;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
-import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.function.Supplier;
+import java.util.stream.Collector;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
 
     public static final Log LOGGER = LogFactory.getLog(CrossAZBlockPlacementPolicy.class);
 
-    public static class Optimizer {
+    public static class Estimator {
 
         public Map<Integer, NavigableSet<Node>> hierarchy(NavigableSet<Node> nodes) {
             return nodes.stream()
@@ -46,7 +47,17 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                     .filter((node) -> node.getLevel() != 0)
                     .collect(Collectors.groupingByConcurrent(
                             Node::getLevel,
-                            Collectors.toCollection(CrossAZBlockPlacementPolicy::newNodeSet))
+                            CrossAZBlockPlacementPolicy.nodeSetCollector())
+                    );
+        }
+
+        public Map<Node, NavigableSet<Node>> clusterByParent(NavigableSet<Node> nodes) {
+            return nodes.stream()
+                    .collect(
+                            Collectors.groupingBy(
+                                    Node::getParent,
+                                    CrossAZBlockPlacementPolicy.nodeSetCollector()
+                            )
                     );
         }
 
@@ -62,18 +73,15 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
 
             Map<Integer, NavigableSet<Node>> hierarchy = hierarchy(nodes);
 
-            boolean not_satisfied = hierarchy.entrySet().stream()
-                    .map((entry) -> {
-                        NavigableSet<Node> same_level = entry.getValue();
-
+            boolean not_satisfied = hierarchy.values().stream()
+                    .map((same_level) -> {
                         // at least two nodes require for each level
                         if (same_level.size() < 2) {
                             return false;
                         }
 
                         // cluster by parent
-                        ConcurrentMap<Node, List<Node>> cluster_by_parent = same_level.stream()
-                                .collect(Collectors.groupingByConcurrent(Node::getParent));
+                        Map<Node, NavigableSet<Node>> cluster_by_parent = clusterByParent(same_level);
 
                         // calculate expected load
                         int total = same_level.size();
@@ -147,20 +155,39 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
 
     protected static final CrossAZBlockBlockPlacementStatus PLACEMENT_OK = new CrossAZBlockBlockPlacementStatus();
 
-    protected static Comparator<Node> NODE_COMPARATOR = Comparator
+    protected static final Comparator<Node> NODE_COMPARATOR = Comparator
             .comparingInt(Node::getLevel)
             .thenComparing(Node::getName);
 
+    protected static final Comparator<DatanodeStorageInfo> STORAGE_COMPARATOR = Comparator
+            .<DatanodeStorageInfo>comparingInt((storage) -> storage.getDatanodeDescriptor().getLevel())
+            .thenComparing((storage) -> storage.getDatanodeDescriptor().getName())
+            .thenComparing(DatanodeStorageInfo::getState)
+            .thenComparing(DatanodeStorageInfo::getStorageType)
+            .thenComparing(DatanodeStorageInfo::getStorageID);
+
     protected static <T extends Node> NavigableSet<T> newNodeSet() {
         return new TreeSet<>(NODE_COMPARATOR);
-        //return new ConcurrentSkipListSet<>(NODE_COMPARATOR);
+    }
+
+
+    protected static NavigableSet<DatanodeStorageInfo> newStorageSet() {
+        return new TreeSet<>(STORAGE_COMPARATOR);
+    }
+
+    protected static <T extends Node> Collector<T, ?, NavigableSet<T>> nodeSetCollector() {
+        return Collectors.toCollection(CrossAZBlockPlacementPolicy::newNodeSet);
+    }
+
+    protected static Collector<DatanodeStorageInfo, ?, NavigableSet<DatanodeStorageInfo>> storageSetCollector() {
+        return Collectors.toCollection(CrossAZBlockPlacementPolicy::newStorageSet);
     }
 
     protected Configuration configuration;
     protected FSClusterStats stats;
     protected NetworkTopology topology;
     protected Host2NodesMap mapping;
-    protected Optimizer optimizer;
+    protected Estimator estimator;
 
     @Override
     public DatanodeStorageInfo[] chooseTarget(
@@ -174,34 +201,6 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
             BlockStoragePolicy storagePolicy) {
         //TODO
         return new DatanodeStorageInfo[0];
-    }
-
-    @Override
-    public List<DatanodeStorageInfo> chooseReplicasToDelete(
-            Collection<DatanodeStorageInfo> candidates,
-            int expectedNumOfReplicas,
-            List<StorageType> excessTypes,
-            DatanodeDescriptor addedNode,
-            DatanodeDescriptor delNodeHint) {
-        // TODO
-        int to_delete = candidates.size() - expectedNumOfReplicas;
-        if (to_delete <= 0) {
-            return Collections.emptyList();
-        }
-
-        // collect datanodes
-        NavigableSet<Node> datanodes = candidates.stream()
-                .map(DatanodeStorageInfo::getDatanodeDescriptor)
-                .collect(Collectors.toCollection(CrossAZBlockPlacementPolicy::newNodeSet));
-        if (!optimizer.isOptimal(datanodes, expectedNumOfReplicas)) {
-            // no even optimal placement
-            // remove nothing
-            return Collections.emptyList();
-        }
-
-        // placement ok,try find exceeded node
-        //TODO
-        return null;
     }
 
     @Override
@@ -237,7 +236,7 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                     + " for replication:" + require_replica);
         }
 
-        if (this.optimizer.isOptimal(deduplicated.stream()
+        if (this.estimator.isOptimal(deduplicated.stream()
                         .collect(Collectors.toCollection(() -> new ConcurrentSkipListSet<>(NODE_COMPARATOR))),
                 require_replica)) {
             return PLACEMENT_OK;
@@ -257,12 +256,152 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
     }
 
     @Override
+    public List<DatanodeStorageInfo> chooseReplicasToDelete(
+            Collection<DatanodeStorageInfo> candidates,
+            int expectedNumOfReplicas,
+            List<StorageType> excessTypes,
+            DatanodeDescriptor addedNode,
+            DatanodeDescriptor delNodeHint) {
+        // deduplicate
+        NavigableSet<DatanodeStorageInfo> storages = newStorageSet();
+        storages.addAll(candidates);
+
+        // replica is not enough, surely no eviction
+        int to_evict = storages.size() - expectedNumOfReplicas;
+        if (to_evict <= 0) {
+            return Collections.emptyList();
+        }
+
+        // collect datanodes
+        Map<DatanodeDescriptor, NavigableSet<DatanodeStorageInfo>> cluster_storage = clusterStorages(storages);
+
+        // is placement optimal?
+        NavigableSet<Node> datanodes = cluster_storage.keySet().stream()
+                .collect(Collectors.toCollection(CrossAZBlockPlacementPolicy::newNodeSet));
+        if (!estimator.isOptimal(datanodes, expectedNumOfReplicas)) {
+            // no even optimal placement
+            // remove nothing
+            return Collections.emptyList();
+        }
+
+        // placement ok, collect eviction candidates
+        NavigableSet<DatanodeStorageInfo> eviction_candidates = newStorageSet();
+
+        // 1. calculate depth
+        int max_level = storages.stream().map(DatanodeStorageInfo::getDatanodeDescriptor)
+                .map(DatanodeDescriptor::getLevel)
+                .max(Integer::compareTo)
+                .orElse(1);
+
+        // prune each level
+        for (int level = max_level; level > 0; level--) {
+            eviction_candidates.addAll(pruneAtLevel(storages, level));
+            if (eviction_candidates.size() >= to_evict) {
+                break;
+            }
+        }
+
+        return eviction_candidates.stream()
+                .limit(to_evict)
+                .collect(Collectors.toList());
+    }
+
+    protected Map<DatanodeDescriptor, NavigableSet<DatanodeStorageInfo>> clusterStorages(
+            NavigableSet<DatanodeStorageInfo> storages) {
+        return storages.stream()
+                .collect(
+                        Collectors.groupingBy(
+                                DatanodeStorageInfo::getDatanodeDescriptor,
+                                Collectors.toCollection(CrossAZBlockPlacementPolicy::newStorageSet)
+                        )
+                );
+    }
+
+    protected Optional<Node> ascensorAtLevel(Node node, int at_level) {
+        Node selected = node;
+        while (selected.getLevel() > at_level) {
+            selected = selected.getParent();
+        }
+
+        if (selected.getLevel() != at_level) {
+            return Optional.empty();
+        }
+
+        return Optional.of(selected);
+    }
+
+    protected NavigableSet<DatanodeStorageInfo> pruneAtLevel(NavigableSet<DatanodeStorageInfo> storages, int level) {
+        return storages.stream()
+                // nodes should deeper
+                .filter((storage) -> storage.getDatanodeDescriptor().getLevel() >= level)
+                // cluster by target level parent
+                .collect(Collectors.groupingBy(
+                        (storage) -> ascensorAtLevel(storage.getDatanodeDescriptor(), level),
+                        CrossAZBlockPlacementPolicy.storageSetCollector())
+                )
+                .entrySet().stream()
+                // filter overloaded
+                .filter((entry) -> entry.getValue().size() > 2)
+                .filter((entry) -> entry.getKey().isPresent())
+                .flatMap((entry) -> {
+                    // find ascensor
+                    Node ascensor = entry.getKey().get();
+
+                    // find cluster
+                    NavigableSet<DatanodeStorageInfo> cluster = entry.getValue();
+
+                    // 1. remove storage located at same node.
+                    // this is necessary for datanode level,
+                    // since storage has no level.
+                    // one can move this out ,
+                    // but keeping here improve bug/algo change immutability.
+                    NavigableSet<DatanodeStorageInfo> same_node_eviction = cluster.stream()
+                            .collect(Collectors.groupingBy(DatanodeStorageInfo::getDatanodeDescriptor))
+                            .values().stream()
+                            .filter((same_node) -> same_node.size() > 1)
+                            .flatMap((same_node) -> same_node.subList(1, same_node.size()).stream())
+                            .collect(Collectors.toCollection(
+                                    CrossAZBlockPlacementPolicy::newStorageSet
+                            ));
+                    cluster.removeAll(same_node_eviction);
+
+                    // 2. cluster by direct child
+                    NavigableSet<DatanodeStorageInfo> keep = cluster.stream()
+                            .collect(Collectors.groupingBy(
+                                    (storage) -> ascensorAtLevel(
+                                            storage.getDatanodeDescriptor(),
+                                            ascensor.getLevel() + 1
+                                    ),
+                                    CrossAZBlockPlacementPolicy.storageSetCollector()
+                            ))
+                            .entrySet().stream()
+                            // sort by numer of storages
+                            .sorted(Comparator.comparing((unit) -> unit.getValue().size()))
+                            .limit(2)
+                            .map(Map.Entry::getValue)
+                            .flatMap(NavigableSet::stream)
+                            .collect(CrossAZBlockPlacementPolicy.storageSetCollector());
+
+                    // 3. select to drop
+                    NavigableSet<DatanodeStorageInfo> to_drop = cluster;
+                    to_drop.removeAll(keep);
+
+                    // 4. merge results
+                    return Stream.of(
+                            same_node_eviction,
+                            to_drop
+                    ).flatMap(Collection::stream);
+                })
+                .collect(CrossAZBlockPlacementPolicy.storageSetCollector());
+    }
+
+    @Override
     protected void initialize(Configuration configuration, FSClusterStats stats, NetworkTopology topology,
                               Host2NodesMap mapping) {
         this.configuration = configuration;
         this.stats = stats;
         this.topology = topology;
         this.mapping = mapping;
-        this.optimizer = new Optimizer();
+        this.estimator = new Estimator();
     }
 }
