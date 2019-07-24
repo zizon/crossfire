@@ -19,8 +19,12 @@ import org.openjdk.jmh.runner.RunnerException;
 import org.openjdk.jmh.runner.options.Options;
 import org.openjdk.jmh.runner.options.OptionsBuilder;
 
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.NavigableSet;
+import java.util.Objects;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
@@ -73,7 +77,7 @@ public class BenchmarkPlacementPolicy {
                 .collect(Collectors.toList());
         datanodes = storages.stream()
                 .map(DatanodeStorageInfo::getDatanodeDescriptor)
-                .collect(Collectors.toCollection(CrossAZBlockPlacementPolicy::newNodeSet));
+                .collect(Collectors.toCollection(() -> new TreeSet<>(CrossAZBlockPlacementPolicy.NODE_COMPARATOR)));
 
         policy = new CrossAZBlockPlacementPolicy();
         default_policy = new BlockPlacementPolicyDefault();
@@ -102,7 +106,20 @@ public class BenchmarkPlacementPolicy {
         policy.verifyBlockPlacement(datanodes, replica);
     }
 
-    @Benchmark
+    protected NavigableSet<DatanodeStorageInfo> buildSet(DatanodeInfo... datanodes) {
+        return Arrays.stream(datanodes)
+                .map((datanode) -> storages.stream()
+                        .filter((storage) ->
+                                storage.getDatanodeDescriptor().compareTo(datanode) == 0
+                        )
+                        .findFirst()
+                        .orElse(null)
+                )
+                .filter(Objects::nonNull)
+                .collect(Collectors.toCollection(() -> new TreeSet<>(CrossAZBlockPlacementPolicy.STORAGE_COMPARATOR)));
+    }
+
+    //@Benchmark
     public void verfiyNormal() {
         //             root      --level 0
         //             /   \
@@ -117,7 +134,7 @@ public class BenchmarkPlacementPolicy {
 
     }
 
-    @Benchmark
+    //@Benchmark
     public void verifyExceed() {
         //             root      --level 0
         //             /   \
@@ -131,7 +148,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    @Benchmark
+    // @Benchmark
     public void verfiyDangle() {
         //             root      --level 0
         //             /   \
@@ -145,7 +162,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    @Benchmark
+    //@Benchmark
     public void verfiyNormalDefault() {
         //             root      --level 0
         //             /   \
@@ -160,7 +177,7 @@ public class BenchmarkPlacementPolicy {
 
     }
 
-    @Benchmark
+    //@Benchmark
     public void verifyExceedDefault() {
         //             root      --level 0
         //             /   \
@@ -174,7 +191,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    @Benchmark
+    //@Benchmark
     public void verfiyDangleDefault() {
         //             root      --level 0
         //             /   \
@@ -188,10 +205,38 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
+    @Benchmark
+    public void chooseReplicasToDelete() {
+        //                   root             --level 0
+        //                /      \
+        //              even      odd         --level 1
+        //             /   \        \
+        //           2       4       1    --level 2
+        //         /       / \  \    \
+        //       2       4  14  24   1  --level 3
+        NavigableSet<DatanodeStorageInfo> storages = buildSet(even_rack_2[0], even_rack_4[0], even_rack_4[1], even_rack_4[2], odd_rack_1[0]);
+        policy.chooseReplicasToDelete(storages,3, Collections.emptyList(), null, null);
+    }
+
+    @Benchmark
+    public void chooseReplicasToDeleteDefault() {
+        //                   root             --level 0
+        //                /      \
+        //              even      odd         --level 1
+        //             /   \        \
+        //           2       4       1    --level 2
+        //         /       / \  \    \
+        //       2       4  14  24   1  --level 3
+        NavigableSet<DatanodeStorageInfo> storages = buildSet(even_rack_2[0], even_rack_4[0], even_rack_4[1], even_rack_4[2], odd_rack_1[0]);
+        default_policy.chooseReplicasToDelete(storages,3, Collections.emptyList(), null, null);
+    }
+
     public static void main(String[] args) throws RunnerException {
         Options opt = new OptionsBuilder()
                 .include(BenchmarkPlacementPolicy.class.getSimpleName())
-                .forks(5)
+                .warmupIterations(0)
+                .measurementIterations(3)
+                .forks(1)
                 .build();
 
         new Runner(opt).run();
