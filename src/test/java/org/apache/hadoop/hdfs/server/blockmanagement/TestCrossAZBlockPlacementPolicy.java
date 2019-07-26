@@ -228,7 +228,18 @@ public class TestCrossAZBlockPlacementPolicy {
                         .toArray(DatanodeInfo[]::new),
                 replica
         );
-        Assert.assertEquals(status.getErrorDescription(), status.isPlacementPolicySatisfied(), satisfied_after_remove);
+        Assert.assertEquals(String.format(
+                "fail reason:%s removed:[%s] remainds:[%s]",
+                status.getErrorDescription(),
+                selected.stream().map((storage) -> String.format(
+                        "(%s)",
+                        storage
+                )).collect(Collectors.joining(",")),
+                storages.stream().map((storage) -> String.format(
+                        "(%s)",
+                        storage
+                )).collect(Collectors.joining(","))
+        ), status.isPlacementPolicySatisfied(), satisfied_after_remove);
     }
 
     @Test
@@ -355,14 +366,12 @@ public class TestCrossAZBlockPlacementPolicy {
 
     @Test
     public void test() {
-        StorageCluster cluster = new StorageCluster(topology,topology.getLeaves(NodeBase.ROOT));
-        LOGGER.info(cluster.root);
-        cluster.children().values().stream()
-                .map(StorageCluster.StorageNode::children)
+        StorageCluster cluster = new StorageCluster(topology, topology.getLeaves(NodeBase.ROOT));
+        //LOGGER.info(cluster.root);
+        cluster.children().stream()
+                .map(cluster::find)
                 //.map(Map.Entry::getKey)
                 //.flatMap(Collection::stream)
                 .forEach(LOGGER::info);
-
-        LOGGER.info(cluster.root().leaves().size());
     }
 }

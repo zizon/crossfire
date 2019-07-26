@@ -254,12 +254,13 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                 .toArray(DatanodeStorageInfo[]::new);
     }
 
-    protected BlockPlacementStatus placementOptimal(StorageCluster.StorageNode node, Map<String, StorageCluster.StorageNode> provided, int require_replica) {
+    protected BlockPlacementStatus placementOptimal(StorageCluster.StorageNode node, StorageCluster cluster, int require_replica) {
+        StorageCluster.StorageNode provided = cluster.find(node.index());
         debugOn(() -> String.format(
-                "test for node:%s provided:%d/[%s] replica:%d",
+                "test for node:(%s) provided:%d/[%s] replica:%d",
                 node,
-                provided.size(),
-                provided.values().stream()
+                provided.children().size(),
+                provided.children().stream()
                         .map((candidate) -> String.format(
                                 "(%s)",
                                 candidate
@@ -268,13 +269,13 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                 require_replica
         ));
 
-        Map<String, StorageCluster.StorageNode> assigned = node.children();
-        int expected_groups = Math.min(require_replica, provided.size());
+        Set<String> assigned = node.children();
+        int expected_groups = Math.min(require_replica, provided.children().size());
         if (assigned.size() != expected_groups) {
             return new CrossAZBlockBlockPlacementStatus(() -> String.format(
                     "for node:%s, avaliable group:%d, expected place:%d, but assigned:%d, replica requirement:%d",
                     node,
-                    provided.size(),
+                    provided.children().size(),
                     expected_groups,
                     assigned.size(),
                     require_replica
@@ -289,20 +290,10 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
         // node has expected placement group.
         // calculate group load
         int max_replica_per_group = require_replica / expected_groups + 1;
-        for (StorageCluster.StorageNode selected : node.children().values()) {
-            StorageCluster.StorageNode hint = provided.get(selected.name());
-            if (hint == null) {
-                return new CrossAZBlockBlockPlacementStatus(() -> String.format(
-                        "selected:%s not found in provided set:{%s}",
-                        selected,
-                        provided.values().stream().map((hited_node) -> String.format(
-                                "(%s)",
-                                hited_node
-                        )).collect(Collectors.joining(","))
-                ));
-            }
+        for (String selected_index : node.children()) {
+            StorageCluster.StorageNode selected = node.cluster().find(selected_index);
 
-            Set<StorageCluster.StorageNode> leaves = selected.leaves();
+            Set<String> leaves = selected.leaves().collect(Collectors.toSet());
             if (leaves.size() > max_replica_per_group) {
                 return new CrossAZBlockBlockPlacementStatus(() -> String.format(
                         "node:%s leaves:%s exceed max groups:%s",
@@ -312,7 +303,7 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                 ));
             }
 
-            BlockPlacementStatus status = placementOptimal(selected, hint.children(), leaves.size());
+            BlockPlacementStatus status = placementOptimal(selected, cluster, leaves.size());
             if (!status.isPlacementPolicySatisfied()) {
                 return status;
             }
@@ -323,48 +314,45 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
 
     @Override
     public BlockPlacementStatus verifyBlockPlacement(DatanodeInfo[] datanodes, int require_replica) {
-        NavigableSet<Node> storage_nodes = Arrays.stream(datanodes)
+        Set<Node> nodes = Arrays.stream(datanodes)
                 .filter(Objects::nonNull)
                 .collect(Collectors.toCollection(() -> new TreeSet<>(NODE_COMPARATOR)));
-        if (storage_nodes.size() < require_replica) {
+        if (nodes.size() < require_replica) {
             return new CrossAZBlockBlockPlacementStatus(() -> String.format(
                     "not enough storage nodes:[%s], require:%s",
-                    storage_nodes.stream()
-                            .map((storage) -> String.format(
+                    nodes.stream()
+                            .map((node) -> String.format(
                                     "(%s)",
-                                    storage
-                            )).collect(Collectors.joining(",")),
+                                    node
+                            ))
+                            .collect(Collectors.joining(",")),
                     require_replica
             ));
         }
 
-        StorageCluster full_cluster = new StorageCluster(topology, topology.getLeaves(NodeBase.ROOT));
-        StorageCluster constructed = new StorageCluster(topology, storage_nodes);
+        StorageCluster constructed = new StorageCluster(topology, nodes);
+        return placementOptimal(constructed.root(), cluster(), require_replica);
+    }
 
-        return placementOptimal(constructed.root(), full_cluster.children(), require_replica);
-        /*
-        NavigableSet<DatanodeInfo> deduplicated = streamToSet(Arrays.stream(datanodes), NODE_COMPARATOR);
-        debugOn(() -> String.format(
-                "verify for datanodes:%s, require_replica:%s",
-                stringify(deduplicated, (datanode) -> String.format(
-                        "(%s,%s,%s)",
-                        datanode.toString(),
-                        datanode.getNetworkLocation(),
-                        datanode.getLevel()
-                )),
-                require_replica
-        ));
+    protected StorageCluster cluster() {
+        return new StorageCluster(topology, topology.getLeaves(NodeBase.ROOT));
+    }
 
-        // do verify
-        BlockPlacementStatus status = verifyBlockPlacement(deduplicated, require_replica);
-        debugOn(() -> String.format(
-                "verify ok:%b messsage:%s",
-                status.isPlacementPolicySatisfied(),
-                status.getErrorDescription()
-        ));
+    protected List<DatanodeStorageInfo> tryRemoveAtNode(StorageCluster.StorageNode node,
+                                                        Map<String, Set<DatanodeStorageInfo>> cluster_by_node,
+                                                        Comparator<DatanodeStorageInfo> evicition_priority
+    ) {
+        List<DatanodeStorageInfo> remvoe_candiates = node.leaves()
+                .map(cluster_by_node::get)
+                .flatMap(Collection::stream)
+                .sorted(evicition_priority)
+                .collect(Collectors.toList());
 
-        return status;
-        */
+        if (remvoe_candiates.size() <= 1) {
+            return Collections.emptyList();
+        }
+
+        return remvoe_candiates.subList(1, remvoe_candiates.size());
     }
 
     @Override
@@ -374,23 +362,32 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
             List<StorageType> excess_types,
             DatanodeDescriptor adde_hint,
             DatanodeDescriptor delete_hint) {
-        // filter failed storage
-        NavigableSet<DatanodeStorageInfo> storages = streamToSet(
+        StorageCluster cluster = cluster();
+        StorageCluster constructed = new StorageCluster(
+                topology,
                 candidates.stream()
-                        .filter((storage) -> storage.getState() != DatanodeStorage.State.FAILED),
-                STORAGE_COMPARATOR
+                        .filter((storage) -> storage.getState() != DatanodeStorage.State.FAILED)
+                        .map(DatanodeStorageInfo::getDatanodeDescriptor)
+                        .collect(Collectors.toList())
         );
-        debugOn(() -> String.format(
-                "before remove:%s",
-                storageStringify(storages)
-        ));
 
-        int max_eviction = storages.size() - expected_replica;
-        if (max_eviction <= 0) {
-            // not enough, no eviction
+        Map<String, Set<DatanodeStorageInfo>> cluster_by_node = candidates.stream()
+                .collect(Collectors.groupingBy(
+                        (storage) -> StorageCluster.index(storage.getDatanodeDescriptor()),
+                        Collectors.toCollection(() -> new TreeSet<>(STORAGE_COMPARATOR))
+                ));
+
+        // calculate active nodes
+        int active = (int) cluster_by_node.values().stream()
+                .collect(Collectors.summarizingInt(Collection::size))
+                .getSum();
+
+        if (active <= expected_replica) {
             return Collections.emptyList();
         }
 
+        int max_removal = active - expected_replica;
+        Map<String, DatanodeStorageInfo> to_remove = new HashMap<>();
         // priority eviction
         Comparator<DatanodeStorageInfo> evicition_priority = evictionPriority(
                 excess_types,
@@ -398,116 +395,51 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                 delete_hint
         );
 
-        /**
-         *  given a hierarchy of placement, strategy to remove storages are:
-         *
-         *  1. aways remvoe from deepest leaf node, since it impact rack diversity in least level(a
-         *  higher level node removal cause less data spread scope， e.g remove a rack node drop the whole rack, while
-         *  a machine drop only the machine itself)
-         *
-         *  2. keep exactly one node for each parent. more children means more potential over replica.
-         *  and removing the last child of a node will cause hierarchy collapse.
-         *
-         *  3. for each level, remove child from the most heavy node first, since it with least hierarchy impact.
-         *
-         */
+        Queue<String> processing_queue = new LinkedList<>(cluster_by_node.keySet());
+        while (!processing_queue.isEmpty()) {
+            if (to_remove.size() >= max_removal) {
+                break;
+            }
 
-        // calculate hierarchy
-        NavigableSet<DatanodeStorageInfo> removals = new TreeSet<>(STORAGE_COMPARATOR);
-        Map<Node, NavigableSet<DatanodeStorageInfo>> storages_under_node = storagesUnderNode(storages);
-        Map<Integer, NavigableSet<Node>> nodes_at_level = levelToNodes(storages_under_node.keySet());
+            StorageCluster.StorageNode not_fail = constructed.find(processing_queue.poll());
+            if (not_fail == null) {
+                continue;
+            }
 
-        nodes_at_level.entrySet().stream()
-                // for each level, sort ndoes in ascending order
-                .sorted((left, right) -> right.getKey() - left.getKey())
-                .forEachOrdered((level_to_nodes) -> {
-                    if (removals.size() >= max_eviction) {
-                        // satisfied
-                        return;
-                    }
+            tryRemoveAtNode(
+                    not_fail,
+                    cluster_by_node,
+                    evicition_priority
+            ).forEach((storage) -> {
+                if (to_remove.size() >= max_removal) {
+                    return;
+                }
 
-                    int level = level_to_nodes.getKey();
-                    NavigableSet<Node> nodes = level_to_nodes.getValue();
-                    debugOn(() -> String.format(
-                            "for level:%d nodes:%s",
-                            level,
-                            stringify(nodes, Node::toString)
-                    ));
+                // remove from cluster_by_node
+                cluster_by_node.computeIfPresent(
+                        StorageCluster.index(storage.getDatanodeDescriptor()),
+                        (key, storages_under_node) -> {
+                            storages_under_node.remove(storage);
+                            return storages_under_node;
+                        }
+                );
 
-                    // for each nodes at this level
-                    nodes.stream()
-                            // 1. get storages cluster of each node.
-                            .map((node) -> new AbstractMap.SimpleImmutableEntry<>(node, storages_under_node.get(node)))
-                            // 2. filter already removed
-                            .map((node_with_storage) -> {
-                                Node node = node_with_storage.getKey();
-                                NavigableSet<DatanodeStorageInfo> node_storages = node_with_storage.getValue();
-                                node_storages.removeAll(removals);
+                // add to removed
+                to_remove.put(storage.getStorageID(), storage);
+            });
+            processing_queue.offer(not_fail.parentIndex());
+        }
 
-                                debugOn(() -> String.format(
-                                        "node:%s with storage:%s",
-                                        node,
-                                        storageStringify(node_storages)
-                                ));
+        // ensure live nodes
+        boolean any_live = cluster_by_node.values().stream()
+                .flatMap(Collection::stream)
+                .anyMatch((storage) -> storage.getState() != DatanodeStorage.State.FAILED);
 
-                                return node_storages;
-                            })
-                            // 3. sort by size,descending order
-                            .sorted(Comparator.comparing((cluster) -> -cluster.size()))
-                            .forEachOrdered((cluster) -> {
-                                if (removals.size() >= max_eviction) {
-                                    // satisfied
-                                    return;
-                                }
+        if (any_live) {
+            return new ArrayList<>(to_remove.values());
+        }
 
-                                debugOn(() -> String.format(
-                                        "for level:%d  before removal:%s remvoed:%s",
-                                        level,
-                                        storageStringify(cluster),
-                                        storageStringify(removals)
-                                ));
-
-                                // 4. keep only one child of this level
-                                cluster.stream()
-                                        .max(evicition_priority)
-                                        .ifPresent((keep) -> {
-                                            // add all to removal except keep
-                                            cluster.remove(keep);
-                                            removals.addAll(cluster);
-
-                                            debugOn(() -> String.format(
-                                                    "for level:%d  keep:%s removing:%s",
-                                                    level,
-                                                    storageStringify(Collections.singleton(keep)),
-                                                    storageStringify(cluster)
-                                            ));
-
-                                            // add back
-                                            cluster.clear();
-                                            cluster.add(keep);
-                                        });
-
-                                debugOn(() -> String.format(
-                                        "for level:%s after remove:%s",
-                                        level,
-                                        storageStringify(cluster)
-                                ));
-                            });
-
-                    // a more optimal approach is to remove in round robbin
-                });
-
-
-        List<DatanodeStorageInfo> removed = removals.stream()
-                .limit(max_eviction)
-                .collect(Collectors.toList());
-
-        debugOn(() -> String.format(
-                "after, remvoed:%s",
-                storageStringify(removed)
-        ));
-
-        return removed;
+        return Collections.emptyList();
     }
 
     protected BlockPlacementStatus verifyBlockPlacement(

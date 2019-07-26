@@ -1,5 +1,6 @@
 package org.apache.hadoop.hdfs.server.blockmanagement;
 
+import com.fs.misc.LazyIterators;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.net.NetworkTopology;
@@ -7,6 +8,8 @@ import org.apache.hadoop.net.Node;
 import org.apache.hadoop.net.NodeBase;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -14,116 +17,114 @@ public class StorageCluster {
 
     public static final Log LOGGER = LogFactory.getLog(StorageCluster.class);
 
-    public static class StorageNode {
+    public static String index(Node node) {
+        if (node == null) {
+            return null;
+        }
+        return node.getNetworkLocation() + "/" + node.getName();
+    }
+
+    public class StorageNode {
         protected final Node node;
-        protected StorageNode parent;
-        protected final Map<String, StorageNode> children;
-        protected final String name;
+
+        protected final Set<String> children;
+        protected final String index;
+        protected final String parent_index;
+
 
         public StorageNode(Node node) {
             this.node = node;
-            this.children = new HashMap<>();
-            this.name = node.getNetworkLocation() + "/" + node.getName();
+            this.children = new HashSet<>();
+            this.index = StorageCluster.index(node);
+            this.parent_index = StorageCluster.index(node.getParent());
         }
 
-        public String name() {
-            return this.name;
+        public String index() {
+            return this.index;
         }
 
-        public StorageNode parent() {
-            return parent;
+        public String parentIndex() {
+            return parent_index;
         }
 
-        public Map<String, StorageNode> children() {
-            return children;
+        public Node node() {
+            return node;
         }
 
-        public StorageNode addChild(StorageNode child) {
-            this.children.compute(child.name, (name, old) -> {
-                if (old != null) {
-                    old.merge(child);
-                    return old;
-                }
-
-                child.parent = this;
-                return child;
-            });
-
-            return this;
+        public void trackChild(String index) {
+            this.children.add(index);
         }
 
-        public StorageNode merge(StorageNode other) {
-            for (StorageNode node:other.children.values()){
-                this.addChild(node);
-            }
-            return this;
+        public StorageCluster cluster() {
+            return StorageCluster.this;
         }
 
-        public Set<StorageNode> leaves() {
-            return this.children.values().stream()
+        public Set<String> children() {
+            return this.children;
+        }
+
+        public Stream<String> leaves() {
+            return this.children.stream()
+                    .map(StorageCluster.this::find)
                     .flatMap((child) -> {
-                        if (child.children().size() == 0) {
-                            return Stream.of(child);
+                        if (child.children().isEmpty()) {
+                            return Stream.of(child.index());
                         }
 
-                        return child.leaves().stream();
-                    })
-                    .collect(Collectors.toSet());
-        }
-
-        @Override
-        public boolean equals(Object o) {
-            if (o instanceof StorageNode) {
-                return this.name.equals(((StorageNode) o).name);
-            }
-
-            return false;
+                        return child.leaves();
+                    });
         }
 
         @Override
         public String toString() {
             return String.format(
-                    "(location:%s,level:%d,name:%s,children:%d)",
-                    node.getNetworkLocation(),
-                    node.getLevel(),
-                    node.getName(),
+                    "index:%s children:%d",
+                    index,
                     children.size()
             );
         }
     }
 
+    protected final Map<String, StorageNode> indexes;
     protected final StorageNode root;
 
     public StorageCluster(NetworkTopology topology, Collection<Node> nodes) {
-        this.root = new StorageNode(topology.getNode(NodeBase.ROOT));
-        if (nodes == null) {
-            return;
-        }
+        this.indexes = new HashMap<>();
+        nodes.stream()
+                // generate nodes
+                .flatMap((node) -> LazyIterators.stream(
+                        LazyIterators.generate(
+                                node,
+                                Optional::ofNullable,
+                                (context, ignore) -> context.getParent()
+                        )
+                ))
+                // index node
+                .map((node) -> this.indexes.computeIfAbsent(
+                        index(node),
+                        (key) -> new StorageNode(node))
+                )
+                // find non root
+                .filter((storage) -> storage.parentIndex() != null)
+                // index parent
+                .forEach((storage) -> this.indexes.computeIfAbsent(
+                        storage.parentIndex(),
+                        (key) -> new StorageNode(storage.node().getParent()))
+                        .trackChild(storage.index())
+                );
 
-        for (Node node : nodes) {
-            if (node == null) {
-                continue;
-            }
-
-            StorageNode storage = new StorageNode(node);
-            for (; ; ) {
-                Node node_parent = storage.node.getParent();
-                if (node_parent == null) {
-                    // reach root
-                    this.root.merge(storage);
-                    break;
-                }
-
-                storage = new StorageNode(node_parent).addChild(storage);
-            }
-        }
+        this.root = this.find(index(topology.getNode(NodeBase.ROOT)));
     }
 
-    public Map<String, StorageNode> children() {
+    public Set<String> children() {
         return this.root.children;
     }
 
+    public StorageNode find(String index) {
+        return this.indexes.get(index);
+    }
+
     public StorageNode root() {
-        return root;
+        return this.root;
     }
 }
