@@ -254,12 +254,12 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                 .toArray(DatanodeStorageInfo[]::new);
     }
 
-    protected BlockPlacementStatus placementOptimal(StorageCluster.StorageNode node, NavigableSet<StorageCluster.StorageNode> provided, int require_replica) {
+    protected BlockPlacementStatus placementOptimal(StorageCluster.StorageNode node, Map<String, StorageCluster.StorageNode> provided, int require_replica) {
         debugOn(() -> String.format(
                 "test for node:%s provided:%d/[%s] replica:%d",
                 node,
                 provided.size(),
-                provided.stream()
+                provided.values().stream()
                         .map((candidate) -> String.format(
                                 "(%s)",
                                 candidate
@@ -268,7 +268,7 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                 require_replica
         ));
 
-        NavigableSet<StorageCluster.StorageNode> assigned = node.children();
+        Map<String, StorageCluster.StorageNode> assigned = node.children();
         int expected_groups = Math.min(require_replica, provided.size());
         if (assigned.size() != expected_groups) {
             return new CrossAZBlockBlockPlacementStatus(() -> String.format(
@@ -289,20 +289,20 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
         // node has expected placement group.
         // calculate group load
         int max_replica_per_group = require_replica / expected_groups + 1;
-        for (StorageCluster.StorageNode selected : node.children()) {
-            StorageCluster.StorageNode hint = provided.ceiling(selected);
-            if (hint == null || hint.compareTo(selected) != 0) {
+        for (StorageCluster.StorageNode selected : node.children().values()) {
+            StorageCluster.StorageNode hint = provided.get(selected.name());
+            if (hint == null) {
                 return new CrossAZBlockBlockPlacementStatus(() -> String.format(
                         "selected:%s not found in provided set:{%s}",
                         selected,
-                        provided.stream().map((hited_node) -> String.format(
+                        provided.values().stream().map((hited_node) -> String.format(
                                 "(%s)",
                                 hited_node
                         )).collect(Collectors.joining(","))
                 ));
             }
 
-            NavigableSet<StorageCluster.StorageNode> leaves = selected.leaves();
+            Set<StorageCluster.StorageNode> leaves = selected.leaves();
             if (leaves.size() > max_replica_per_group) {
                 return new CrossAZBlockBlockPlacementStatus(() -> String.format(
                         "node:%s leaves:%s exceed max groups:%s",
@@ -325,7 +325,7 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
     public BlockPlacementStatus verifyBlockPlacement(DatanodeInfo[] datanodes, int require_replica) {
         NavigableSet<Node> storage_nodes = Arrays.stream(datanodes)
                 .filter(Objects::nonNull)
-                .collect(Collectors.toCollection(() -> new TreeSet<>(StorageCluster.NODE_COMPARATOR)));
+                .collect(Collectors.toCollection(() -> new TreeSet<>(NODE_COMPARATOR)));
         if (storage_nodes.size() < require_replica) {
             return new CrossAZBlockBlockPlacementStatus(() -> String.format(
                     "not enough storage nodes:[%s], require:%s",

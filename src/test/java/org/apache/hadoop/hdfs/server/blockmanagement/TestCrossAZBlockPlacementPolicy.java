@@ -356,9 +356,10 @@ public class TestCrossAZBlockPlacementPolicy {
     @Test
     public void test() {
         StorageCluster cluster = new StorageCluster(topology,topology.getLeaves(NodeBase.ROOT));
-        //LOGGER.info(cluster.root);
-        cluster.children().stream()
-                //.map(StoragCluster.StorageNode::children)
+        LOGGER.info(cluster.root);
+        cluster.children().values().stream()
+                .map(StorageCluster.StorageNode::children)
+                //.map(Map.Entry::getKey)
                 //.flatMap(Collection::stream)
                 .forEach(LOGGER::info);
 
