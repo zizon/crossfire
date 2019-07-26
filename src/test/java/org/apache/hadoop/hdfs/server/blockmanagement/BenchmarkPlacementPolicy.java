@@ -7,6 +7,7 @@ import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
 import org.apache.hadoop.net.NetworkTopology;
+import org.apache.hadoop.net.NodeBase;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Mode;
@@ -119,7 +120,12 @@ public class BenchmarkPlacementPolicy {
                 .collect(Collectors.toCollection(() -> new TreeSet<>(CrossAZBlockPlacementPolicy.STORAGE_COMPARATOR)));
     }
 
-    //@Benchmark
+    @Benchmark
+    public void clusterSetup() {
+        StorageCluster cluster = new StorageCluster(topology,topology.getLeaves(NodeBase.ROOT));
+    }
+
+    @Benchmark
     public void verfiyNormal() {
         //             root      --level 0
         //             /   \
@@ -134,7 +140,7 @@ public class BenchmarkPlacementPolicy {
 
     }
 
-    //@Benchmark
+    @Benchmark
     public void verifyExceed() {
         //             root      --level 0
         //             /   \
@@ -148,7 +154,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    // @Benchmark
+    @Benchmark
     public void verfiyDangle() {
         //             root      --level 0
         //             /   \
@@ -162,7 +168,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    //@Benchmark
+    @Benchmark
     public void verfiyNormalDefault() {
         //             root      --level 0
         //             /   \
@@ -177,7 +183,7 @@ public class BenchmarkPlacementPolicy {
 
     }
 
-    //@Benchmark
+    @Benchmark
     public void verifyExceedDefault() {
         //             root      --level 0
         //             /   \
@@ -191,7 +197,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    //@Benchmark
+    @Benchmark
     public void verfiyDangleDefault() {
         //             root      --level 0
         //             /   \
@@ -205,7 +211,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    @Benchmark
+    //@Benchmark
     public void chooseReplicasToDelete() {
         //                   root             --level 0
         //                /      \
@@ -215,10 +221,10 @@ public class BenchmarkPlacementPolicy {
         //         /       / \  \    \
         //       2       4  14  24   1  --level 3
         NavigableSet<DatanodeStorageInfo> storages = buildSet(even_rack_2[0], even_rack_4[0], even_rack_4[1], even_rack_4[2], odd_rack_1[0]);
-        policy.chooseReplicasToDelete(storages,3, Collections.emptyList(), null, null);
+        policy.chooseReplicasToDelete(storages, 3, Collections.emptyList(), null, null);
     }
 
-    @Benchmark
+    //@Benchmark
     public void chooseReplicasToDeleteDefault() {
         //                   root             --level 0
         //                /      \
@@ -228,14 +234,14 @@ public class BenchmarkPlacementPolicy {
         //         /       / \  \    \
         //       2       4  14  24   1  --level 3
         NavigableSet<DatanodeStorageInfo> storages = buildSet(even_rack_2[0], even_rack_4[0], even_rack_4[1], even_rack_4[2], odd_rack_1[0]);
-        default_policy.chooseReplicasToDelete(storages,3, Collections.emptyList(), null, null);
+        default_policy.chooseReplicasToDelete(storages, 3, Collections.emptyList(), null, null);
     }
 
     public static void main(String[] args) throws RunnerException {
         Options opt = new OptionsBuilder()
                 .include(BenchmarkPlacementPolicy.class.getSimpleName())
                 .warmupIterations(0)
-                .measurementIterations(3)
+                .measurementIterations(60)
                 .forks(1)
                 .build();
 

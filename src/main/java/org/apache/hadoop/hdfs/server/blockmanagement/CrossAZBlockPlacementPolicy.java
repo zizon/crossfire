@@ -13,19 +13,10 @@ import org.apache.hadoop.net.NetworkTopology;
 import org.apache.hadoop.net.Node;
 import org.apache.hadoop.net.NodeBase;
 
-import java.util.AbstractMap;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.NavigableSet;
-import java.util.Optional;
-import java.util.Set;
-import java.util.TreeSet;
+import java.util.*;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -83,19 +74,275 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
     @Override
     public DatanodeStorageInfo[] chooseTarget(
             String path,
-            int requrest_replica,
+            int reqeusting,
             Node writer,
             List<DatanodeStorageInfo> chosen,
             boolean returnChosenNodes,
             Set<Node> excludes,
-            long blocksize,
+            long block_size,
             BlockStoragePolicy storage_policy) {
-        //TODO
-        return new DatanodeStorageInfo[0];
+        //todo
+        return this.chooseTarget(
+                path,
+                reqeusting,
+                writer,
+                Optional.ofNullable(excludes)
+                        .orElseGet(Collections::emptySet),
+                block_size,
+                Collections.emptyList(),
+                storage_policy
+        );
+    }
+
+    @Override
+    DatanodeStorageInfo[] chooseTarget(String path,
+                                       int num_of_replicas,
+                                       Node writer,
+                                       Set<Node> excludes,
+                                       long block_size,
+                                       List<DatanodeDescriptor> favored,
+                                       BlockStoragePolicy storage_policy) {
+        List<StorageType> storage_types = storage_policy.chooseStorageTypes((short) num_of_replicas);
+        Map<Node, NavigableSet<DatanodeStorageInfo>> storages_under_node = selectiveStorages(
+                block_size,
+                Optional.ofNullable(excludes).orElseGet(Collections::emptySet),
+                Optional.ofNullable(storage_types).orElseGet(Collections::emptyList)
+        );
+
+        // 1. decided datacenter
+        Predicate<Node> datacenter_predicator = Optional.ofNullable(writer)
+                // try from writer
+                .flatMap((initiator) -> resolveToLevel(initiator, 1))
+                .map((datacenter) -> {
+                    debugOn(() -> String.format(
+                            "selecte datacenter:%s from writer:%s",
+                            datacenter,
+                            writer
+                    ));
+                    return datacenter;
+                })
+                .map(Collections::singleton)
+                // or try from favored
+                .orElseGet(
+                        () -> Optional.ofNullable(favored)
+                                .<Set<Node>>map((prefers -> prefers.stream()
+                                        .map((node) -> resolveToLevel(node, 1))
+                                        .filter(Optional::isPresent)
+                                        .map(Optional::get)
+                                        .collect(Collectors.toCollection(() -> new TreeSet<>(NODE_COMPARATOR)))
+                                ))
+                                .orElseGet(Collections::emptySet)
+                ).stream()
+                .findFirst()
+                .map((datacenter) -> {
+                    debugOn(() -> String.format(
+                            "select datacneter from favored node:%s datacenter:%s",
+                            stringify(favored, (datanode) -> String.format(
+                                    "%s,%s,%s",
+                                    datanode.getNetworkLocation(),
+                                    datanode.getLevel(),
+                                    datanode.getDatanodeUuid()
+                            )),
+                            datacenter
+                    ));
+                    return datacenter;
+                })
+                .<Predicate<Node>>map((datacenter) ->
+                        (node) -> {
+                            debugOn(() -> String.format(
+                                    "use datacenter favor:%s",
+                                    datacenter
+                            ));
+
+                            return resolveToLevel(node, 1)
+                                    .map((resovled) -> NODE_COMPARATOR.compare(resovled, node) == 0)
+                                    .orElse(false);
+                        }
+                ).orElseGet(() -> {
+                    debugOn(() -> "not using datacenter favor");
+                    return (ignore) -> true;
+                });
+
+        // 2. stick to datacenter predicator
+        storages_under_node.entrySet().stream()
+                .map((entry) -> {
+                    NavigableSet<DatanodeStorageInfo> cluster = entry.getValue();
+                    // remove nodes not in datacenter
+                    cluster.removeIf((storage) -> {
+                        boolean same_datacenter = datacenter_predicator.test(storage.getDatanodeDescriptor());
+                        debugOn(() -> String.format(
+                                "remove storage:%s for located in different datacenter",
+                                storageStringify(Collections.singleton(storage))
+                        ));
+                        return same_datacenter;
+                    });
+                    return cluster.isEmpty() ? entry.getKey() : null;
+                })
+                .filter(Objects::nonNull)
+                // clear useless nodes
+                .collect(Collectors.toCollection(() -> new TreeSet<>(NODE_COMPARATOR)))
+                .forEach(storages_under_node::remove);
+
+        // 3. flatten to level
+        Map<Integer, NavigableSet<Node>> level_to_nodes = levelToNodes(storages_under_node.keySet());
+
+        // 4. choose
+        Comparator<DatanodeStorageInfo> favor_priority = evictionPriority(
+                Collections.emptyList(),
+                null,
+                null
+        );
+        NavigableSet<DatanodeStorageInfo> chosen = new TreeSet<>(STORAGE_COMPARATOR);
+        level_to_nodes.entrySet().stream()
+                .sorted(Comparator.comparing(Map.Entry::getKey))
+                .forEachOrdered((entry) -> {
+                    if (chosen.size() >= num_of_replicas) {
+                        // satisfied
+                        return;
+                    }
+
+                    int level = entry.getKey();
+                    NavigableSet<Node> nodes_at_level = entry.getValue();
+
+                    NavigableSet<Node> chosen_nodes_at_level = chosen.stream()
+                            .map((node) -> resolveToLevel(node.getDatanodeDescriptor(), level))
+                            .filter(Optional::isPresent)
+                            .map(Optional::get)
+                            .collect(Collectors.toCollection(() -> new TreeSet<>(NODE_COMPARATOR)));
+
+                    // select one for each node
+                    entry.getValue().stream()
+                            .forEach((node_at_level) -> {
+                                if (chosen.size() >= num_of_replicas) {
+                                    // satisfied
+                                    return;
+                                }
+
+                                NavigableSet<DatanodeStorageInfo> candidates = storages_under_node.get(node_at_level);
+                                candidates.stream()
+                                        .max(favor_priority
+                                                .thenComparing((storage) -> {
+                                                    boolean node_already_chosen = resolveToLevel(storage.getDatanodeDescriptor(), level)
+                                                            .map((resovled_node) -> NODE_COMPARATOR.compare(
+                                                                    resovled_node,
+                                                                    node_at_level
+                                                            ) == 0)
+                                                            .orElse(false);
+
+                                                    // favor not selected nodes
+                                                    return node_already_chosen ? -1 : 0;
+                                                }))
+                                        .ifPresent(chosen::add);
+
+                                // remove chosen
+                                candidates.removeAll(chosen);
+                            });
+                });
+
+
+        // done
+        return Stream.of(
+                chosen.stream(),
+                storages_under_node.values().stream()
+                        .flatMap(Collection::stream)
+                        .distinct()
+                        // randome drop
+                        .filter((ignore) -> ThreadLocalRandom.current().nextBoolean())
+                        .sorted(favor_priority.reversed())
+        ).flatMap(Function.identity())
+                .limit(num_of_replicas)
+                .toArray(DatanodeStorageInfo[]::new);
+    }
+
+    protected BlockPlacementStatus placementOptimal(StorageCluster.StorageNode node, NavigableSet<StorageCluster.StorageNode> provided, int require_replica) {
+        debugOn(() -> String.format(
+                "test for node:%s provided:%d/[%s] replica:%d",
+                node,
+                provided.size(),
+                provided.stream()
+                        .map((candidate) -> String.format(
+                                "(%s)",
+                                candidate
+                        ))
+                        .collect(Collectors.joining(",")),
+                require_replica
+        ));
+
+        NavigableSet<StorageCluster.StorageNode> assigned = node.children();
+        int expected_groups = Math.min(require_replica, provided.size());
+        if (assigned.size() != expected_groups) {
+            return new CrossAZBlockBlockPlacementStatus(() -> String.format(
+                    "for node:%s, avaliable group:%d, expected place:%d, but assigned:%d, replica requirement:%d",
+                    node,
+                    provided.size(),
+                    expected_groups,
+                    assigned.size(),
+                    require_replica
+            ));
+        }
+
+        // no group required
+        if (expected_groups == 0) {
+            return PLACEMENT_OK;
+        }
+
+        // node has expected placement group.
+        // calculate group load
+        int max_replica_per_group = require_replica / expected_groups + 1;
+        for (StorageCluster.StorageNode selected : node.children()) {
+            StorageCluster.StorageNode hint = provided.ceiling(selected);
+            if (hint == null || hint.compareTo(selected) != 0) {
+                return new CrossAZBlockBlockPlacementStatus(() -> String.format(
+                        "selected:%s not found in provided set:{%s}",
+                        selected,
+                        provided.stream().map((hited_node) -> String.format(
+                                "(%s)",
+                                hited_node
+                        )).collect(Collectors.joining(","))
+                ));
+            }
+
+            NavigableSet<StorageCluster.StorageNode> leaves = selected.leaves();
+            if (leaves.size() > max_replica_per_group) {
+                return new CrossAZBlockBlockPlacementStatus(() -> String.format(
+                        "node:%s leaves:%s exceed max groups:%s",
+                        selected,
+                        leaves.size(),
+                        max_replica_per_group
+                ));
+            }
+
+            BlockPlacementStatus status = placementOptimal(selected, hint.children(), leaves.size());
+            if (!status.isPlacementPolicySatisfied()) {
+                return status;
+            }
+        }
+
+        return PLACEMENT_OK;
     }
 
     @Override
     public BlockPlacementStatus verifyBlockPlacement(DatanodeInfo[] datanodes, int require_replica) {
+        NavigableSet<Node> storage_nodes = Arrays.stream(datanodes)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toCollection(() -> new TreeSet<>(StorageCluster.NODE_COMPARATOR)));
+        if (storage_nodes.size() < require_replica) {
+            return new CrossAZBlockBlockPlacementStatus(() -> String.format(
+                    "not enough storage nodes:[%s], require:%s",
+                    storage_nodes.stream()
+                            .map((storage) -> String.format(
+                                    "(%s)",
+                                    storage
+                            )).collect(Collectors.joining(",")),
+                    require_replica
+            ));
+        }
+
+        StorageCluster full_cluster = new StorageCluster(topology, topology.getLeaves(NodeBase.ROOT));
+        StorageCluster constructed = new StorageCluster(topology, storage_nodes);
+
+        return placementOptimal(constructed.root(), full_cluster.children(), require_replica);
+        /*
         NavigableSet<DatanodeInfo> deduplicated = streamToSet(Arrays.stream(datanodes), NODE_COMPARATOR);
         debugOn(() -> String.format(
                 "verify for datanodes:%s, require_replica:%s",
@@ -117,6 +364,7 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
         ));
 
         return status;
+        */
     }
 
     @Override
@@ -150,12 +398,27 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                 delete_hint
         );
 
+        /**
+         *  given a hierarchy of placement, strategy to remove storages are:
+         *
+         *  1. aways remvoe from deepest leaf node, since it impact rack diversity in least level(a
+         *  higher level node removal cause less data spread scope， e.g remove a rack node drop the whole rack, while
+         *  a machine drop only the machine itself)
+         *
+         *  2. keep exactly one node for each parent. more children means more potential over replica.
+         *  and removing the last child of a node will cause hierarchy collapse.
+         *
+         *  3. for each level, remove child from the most heavy node first, since it with least hierarchy impact.
+         *
+         */
+
         // calculate hierarchy
         NavigableSet<DatanodeStorageInfo> removals = new TreeSet<>(STORAGE_COMPARATOR);
         Map<Node, NavigableSet<DatanodeStorageInfo>> storages_under_node = storagesUnderNode(storages);
         Map<Integer, NavigableSet<Node>> nodes_at_level = levelToNodes(storages_under_node.keySet());
 
         nodes_at_level.entrySet().stream()
+                // for each level, sort ndoes in ascending order
                 .sorted((left, right) -> right.getKey() - left.getKey())
                 .forEachOrdered((level_to_nodes) -> {
                     if (removals.size() >= max_eviction) {
@@ -171,8 +434,9 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                             stringify(nodes, Node::toString)
                     ));
 
+                    // for each nodes at this level
                     nodes.stream()
-                            // 1. get storages cluster of each node
+                            // 1. get storages cluster of each node.
                             .map((node) -> new AbstractMap.SimpleImmutableEntry<>(node, storages_under_node.get(node)))
                             // 2. filter already removed
                             .map((node_with_storage) -> {
@@ -229,6 +493,8 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                                         storageStringify(cluster)
                                 ));
                             });
+
+                    // a more optimal approach is to remove in round robbin
                 });
 
 
@@ -456,6 +722,34 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                 collection.stream()
                         .map(to_string)
                         .collect(Collectors.joining(","))
+        );
+    }
+
+    protected Map<Node, NavigableSet<DatanodeStorageInfo>> selectiveStorages(
+            long avaliable_space,
+            Set<Node> excludes,
+            List<StorageType> storage_types) {
+        return storagesUnderNode(this.topology.getLeaves(NodeBase.ROOT).stream()
+                .filter((node) ->
+                        // node path not in excludes
+                        !LazyIterators.stream(LazyIterators.generate(
+                                (Node) node,
+                                Optional::ofNullable,
+                                (context, new_value) -> context.getParent()
+                                )
+                        ).anyMatch(excludes::contains)
+                )
+                .filter((node) -> node instanceof DatanodeDescriptor)
+                .map(DatanodeDescriptor.class::cast)
+                .flatMap((datanode) -> Arrays.stream(datanode.getStorageInfos()))
+                //.filter((storage) -> storage.getState() != DatanodeStorage.State.FAILED)
+                //.filter((storage) -> storage_types.isEmpty() || storage_types.contains(storage.getStorageType()))
+                //.filter((storage) -> storage.getRemaining() >= avaliable_space)
+                .peek((storage) -> debugOn(() -> String.format(
+                        "collect storage:%s",
+                        storageStringify(Collections.singleton(storage))
+                )))
+                .collect(Collectors.toCollection(() -> new TreeSet<>(STORAGE_COMPARATOR)))
         );
     }
 
