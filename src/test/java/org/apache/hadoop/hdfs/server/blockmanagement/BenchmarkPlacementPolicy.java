@@ -211,7 +211,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    //@Benchmark
+    @Benchmark
     public void chooseReplicasToDelete() {
         //                   root             --level 0
         //                /      \
@@ -224,7 +224,7 @@ public class BenchmarkPlacementPolicy {
         policy.chooseReplicasToDelete(storages, 3, Collections.emptyList(), null, null);
     }
 
-    //@Benchmark
+    @Benchmark
     public void chooseReplicasToDeleteDefault() {
         //                   root             --level 0
         //                /      \
@@ -241,7 +241,7 @@ public class BenchmarkPlacementPolicy {
         Options opt = new OptionsBuilder()
                 .include(BenchmarkPlacementPolicy.class.getSimpleName())
                 .warmupIterations(0)
-                .measurementIterations(60)
+                .measurementIterations(2)
                 .forks(1)
                 .build();
 

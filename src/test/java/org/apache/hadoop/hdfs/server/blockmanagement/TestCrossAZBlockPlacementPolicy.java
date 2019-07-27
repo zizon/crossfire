@@ -325,7 +325,7 @@ public class TestCrossAZBlockPlacementPolicy {
         //       2       4  14  24   1  --level 3
         LOGGER.info("-------------------------");
         storages = buildSet(DatanodeStorage.State.NORMAL, even_rack_2[0], even_rack_4[0], even_rack_4[1], even_rack_4[2], odd_rack_1[0]);
-        helpTestchooseReplicasToDelete(4, 0, storages, "satisfied with exceeded node case 3", true);
+        helpTestchooseReplicasToDelete(4, 0, storages, "satisfied with exceeded node case 3", false);
 
         //                   root             --level 0
         //                /      \
@@ -366,12 +366,15 @@ public class TestCrossAZBlockPlacementPolicy {
 
     @Test
     public void test() {
+
+        LOGGER.info(topology.getDatanodesInRack("/"));
+
         StorageCluster cluster = new StorageCluster(topology, topology.getLeaves(NodeBase.ROOT));
         //LOGGER.info(cluster.root);
         cluster.children().stream()
-                .map(cluster::find)
+                .map(cluster::find);
                 //.map(Map.Entry::getKey)
                 //.flatMap(Collection::stream)
-                .forEach(LOGGER::info);
+                //.forEach(LOGGER::info);
     }
 }
