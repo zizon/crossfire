@@ -1,6 +1,7 @@
 package org.apache.hadoop.hdfs.server.blockmanagement;
 
 import com.fs.misc.Promise;
+import com.google.common.base.Strings;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -101,66 +102,6 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
         return null;
     }
 
-    protected BlockPlacementStatus placementOptimal(StorageCluster.StorageNode node, StorageCluster cluster, int require_replica) {
-        StorageCluster.StorageNode provided = cluster.find(node.index());
-        debugOn(() -> String.format(
-                "test for node:(%s) provided:%d/[%s] replica:%d",
-                node,
-                provided.children().size(),
-                provided.children().stream()
-                        .map((candidate) -> String.format(
-                                "(%s)",
-                                candidate
-                        ))
-                        .collect(Collectors.joining(",")),
-                require_replica
-        ));
-
-        Set<String> assigned = node.children();
-        int expected_groups = Math.min(require_replica, provided.children().size());
-        if (assigned.size() != expected_groups) {
-            return new CrossAZBlockBlockPlacementStatus(() -> String.format(
-                    "for node:%s, avaliable group:%d, expected place:%d, but assigned:%d, replica requirement:%d",
-                    node,
-                    provided.children().size(),
-                    expected_groups,
-                    assigned.size(),
-                    require_replica
-            ));
-        }
-
-        // no group required
-        if (expected_groups == 0) {
-            return PLACEMENT_OK;
-        }
-
-        // node has expected placement group.
-        // calculate group load
-        int max_replica_per_group = require_replica % expected_groups == 0
-                ? require_replica / expected_groups
-                : require_replica / expected_groups + 1;
-        for (String selected_index : node.children()) {
-            StorageCluster.StorageNode selected = node.cluster().find(selected_index);
-
-            Set<String> leaves = selected.leaves().collect(Collectors.toSet());
-            if (leaves.size() > max_replica_per_group) {
-                return new CrossAZBlockBlockPlacementStatus(() -> String.format(
-                        "node:%s leaves:%s exceed max groups:%s",
-                        selected,
-                        leaves.size(),
-                        max_replica_per_group
-                ));
-            }
-
-            BlockPlacementStatus status = placementOptimal(selected, cluster, leaves.size());
-            if (!status.isPlacementPolicySatisfied()) {
-                return status;
-            }
-        }
-
-        return PLACEMENT_OK;
-    }
-
     @Override
     public BlockPlacementStatus verifyBlockPlacement(DatanodeInfo[] datanodes, int require_replica) {
         if (datanodes.length < require_replica) {
@@ -231,9 +172,10 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                 if (placed_group.size() < available_group.size()
                         && placed.size() > placed_group.size()) {
                     // more group available,not optimal
+                    Node current = tracking;
                     return new CrossAZBlockBlockPlacementStatus(() -> String.format(
                             "location:%s to place:%d in available:%d but placed:%d",
-                            location,
+                            NodeBase.getPath(current),
                             placed.size(),
                             available_group.size(),
                             placed_group.size()
@@ -304,80 +246,126 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
             List<StorageType> excess_types,
             DatanodeDescriptor adde_hint,
             DatanodeDescriptor delete_hint) {
-        StorageCluster constructed = new StorageCluster(
-                topology,
-                candidates.stream()
-                        .filter((storage) -> storage.getState() != DatanodeStorage.State.FAILED)
-                        .map(DatanodeStorageInfo::getDatanodeDescriptor)
-                        .collect(Collectors.toList())
-        );
-
-        Map<String, Set<DatanodeStorageInfo>> cluster_by_node = candidates.stream()
-                .collect(Collectors.groupingBy(
-                        (storage) -> StorageCluster.index(storage.getDatanodeDescriptor()),
-                        Collectors.toCollection(() -> new TreeSet<>(STORAGE_COMPARATOR))
-                ));
-
-        // calculate active nodes
-        int active = (int) cluster_by_node.values().stream()
-                .collect(Collectors.summarizingInt(Collection::size))
-                .getSum();
-
-        if (active <= expected_replica) {
+        if (candidates.size() <= expected_replica) {
             return Collections.emptyList();
         }
 
-        int max_removal = active - expected_replica;
-        Map<String, DatanodeStorageInfo> to_remove = new HashMap<>();
-        // priority eviction
-        Comparator<DatanodeStorageInfo> evicition_priority = evictionPriority(
-                excess_types,
-                adde_hint,
-                delete_hint
-        );
+        NetworkTopology constructed = new NetworkTopology();
+        Comparator<DatanodeStorageInfo> comparator = (left, right) -> {
+            DatanodeDescriptor left_node = left.getDatanodeDescriptor();
+            DatanodeDescriptor right_node = right.getDatanodeDescriptor();
 
-        Queue<String> processing_queue = new LinkedList<>(cluster_by_node.keySet());
-        while (!processing_queue.isEmpty()) {
-            if (to_remove.size() >= max_removal) {
-                break;
-            }
+            int compared = left_node.getDatanodeUuid().compareTo(right_node.getDatanodeUuid());
 
-            StorageCluster.StorageNode not_fail = constructed.find(processing_queue.poll());
-            if (not_fail == null) {
-                continue;
-            }
-
-            tryRemoveAtNode(
-                    not_fail,
-                    cluster_by_node,
-                    evicition_priority
-            ).forEach((storage) -> {
-                if (to_remove.size() >= max_removal) {
-                    return;
+            // same datanode
+            if (compared == 0) {
+                // fail node first
+                if (left.getState() == DatanodeStorage.State.FAILED
+                        && right.getState() != DatanodeStorage.State.FAILED) {
+                    return -1;
+                } else if (right.getState() == DatanodeStorage.State.FAILED) {
+                    return 1;
                 }
 
-                // remove from cluster_by_node
-                cluster_by_node.computeIfPresent(
-                        StorageCluster.index(storage.getDatanodeDescriptor()),
-                        (key, storages_under_node) -> {
-                            storages_under_node.remove(storage);
-                            return storages_under_node;
-                        }
-                );
+                // both not fail,
+                // less usable first
+                return Long.compareUnsigned(left.getRemaining(), right.getRemaining());
+            }
 
-                // add to removed
-                to_remove.put(storage.getStorageID(), storage);
-            });
-            processing_queue.offer(not_fail.parentIndex());
+            // same rack?
+            String left_location = left_node.getNetworkLocation();
+            String right_location = right_node.getNetworkLocation();
+            compared = left_location.compareTo(right_location);
+            if (compared == 0) {
+                // less space first
+                return -Long.compare(left.getRemaining(), right.getRemaining());
+            }
+
+            // different rack
+            // deeper first
+            compared = -Integer.compare(left_node.getLevel(), right_node.getLevel());
+            if (compared != 0) {
+                return compared;
+            }
+
+            // differnt rack in same level
+            // node the parent that has more children first
+            for (; ; ) {
+                List<Node> left_siblings = constructed.getDatanodesInRack(left_location);
+                List<Node> righ_siblings = constructed.getDatanodesInRack(right_location);
+                compared = -Integer.compare(left_siblings.size(), righ_siblings.size());
+                if (compared != 0) {
+                    return compared;
+                }
+
+                String left_parent_location = constructed.getNode(left_location).getNetworkLocation();
+                String right_parent_location = constructed.getNode(right_location).getNetworkLocation();
+
+                compared = left_parent_location.compareTo(right_parent_location);
+                if (compared == 0) {
+                    // reach same parent, compare by uuid
+                    return left_location.compareTo(right_location);
+                }
+
+                left_location = left_parent_location;
+                right_location = right_parent_location;
+            }
+        };
+
+        // sort nodes
+        List<DatanodeStorageInfo> storges = candidates.stream()
+                .peek((storage) -> constructed.add(storage.getDatanodeDescriptor()))
+                .sorted(comparator)
+                .collect(Collectors.toList());
+        List<DatanodeStorageInfo> log_reference = storges;
+        debugOn(() -> String.format(
+                "initial delete order:[%s]",
+                log_reference.stream().map((node) -> String.format(
+                        "(%s:%s)",
+                        node,
+                        node.getState()
+                )).collect(Collectors.joining(","))
+        ));
+
+        int max_eviction = candidates.size() - expected_replica;
+        List<DatanodeStorageInfo> to_remove = new ArrayList<>(max_eviction);
+        while (to_remove.size() < max_eviction) {
+            if (storges.isEmpty()) {
+                // all removed,something wrong,give up
+                LOGGER.warn("all removed,something wrong,give up");
+                return Collections.emptyList();
+            }
+
+            DatanodeStorageInfo candidate = storges.get(0);
+            to_remove.add(candidate);
+
+            if (storges.size() > 1) {
+                DatanodeStorageInfo next = storges.get(1);
+                if (candidate.getDatanodeDescriptor().getName().compareTo(
+                        next.getDatanodeDescriptor().getName()) != 0) {
+                    // datanode consumed,remove from topology
+                    constructed.remove(candidate.getDatanodeDescriptor());
+                }
+            }
+            // resort
+            List<DatanodeStorageInfo> new_storages = storges.subList(1, storges.size());
+            new_storages.sort(comparator);
+
+            debugOn(() -> String.format(
+                    "select node:(%s) to delete, after delete order:[%s]",
+                    candidate,
+                    new_storages.stream().map((node) -> String.format(
+                            "(%s:%s)",
+                            node,
+                            node.getState()
+                    )).collect(Collectors.joining(","))
+            ));
+
+            storges = new_storages;
         }
 
-        // ensure live nodes
-        boolean any_live = cluster_by_node.values().stream()
-                .flatMap(Collection::stream)
-                .anyMatch((storage) -> storage.getState() != DatanodeStorage.State.FAILED);
-
-        if (any_live) {
-            return new ArrayList<>(to_remove.values());
+        if (storges.stream().anyMatch((storage) -> storage.getState() != DatanodeStorage.State.FAILED)) {
+            return to_remove;
         }
 
         return Collections.emptyList();

@@ -137,7 +137,6 @@ public class BenchmarkPlacementPolicy {
         helpBenchmarkVerifyBlockPlacement(policy, 5,
                 even_rack_2[0], even_rack_4[0], even_rack_6[0], odd_rack_1[0], odd_rack_3[0]
         );
-
     }
 
     @Benchmark

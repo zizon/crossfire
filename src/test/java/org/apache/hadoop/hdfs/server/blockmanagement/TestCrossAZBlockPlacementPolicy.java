@@ -200,13 +200,14 @@ public class TestCrossAZBlockPlacementPolicy {
         );
     }
 
-    protected NavigableSet<DatanodeStorageInfo> buildSet(DatanodeStorage.State state, DatanodeInfo... datanodes) {
+    protected NavigableSet<DatanodeStorageInfo> buildSet(DatanodeStorage.State state, StorageType type, DatanodeInfo... datanodes) {
         return Arrays.stream(datanodes)
                 .map((datanode) -> storages.stream()
                         .filter((storage) ->
                                 storage.getDatanodeDescriptor().compareTo(datanode) == 0
                         )
                         .filter((storage) -> storage.getState() == state)
+                        .filter((storage) -> storage.getStorageType() == type)
                         .findFirst()
                         .orElse(null)
                 )
@@ -239,7 +240,10 @@ public class TestCrossAZBlockPlacementPolicy {
                         "(%s)",
                         storage
                 )).collect(Collectors.joining(","))
-        ), status.isPlacementPolicySatisfied(), satisfied_after_remove);
+                ),
+                satisfied_after_remove,
+                status.isPlacementPolicySatisfied()
+        );
     }
 
     @Test
@@ -249,6 +253,7 @@ public class TestCrossAZBlockPlacementPolicy {
         DatanodeInfo[] odd_rack_1 = selectSubset("odd", "rack_1");
         DatanodeInfo[] odd_rack_3 = selectSubset("odd", "rack_3");
         DatanodeInfo[] odd_rack_5 = selectSubset("odd", "rack_5");
+        StorageType type = StorageType.SSD;
 
         //             root      --level 0
         //             /
@@ -257,8 +262,8 @@ public class TestCrossAZBlockPlacementPolicy {
         //       2              --level 2
         //     / \ \
         //   2  12  22          --level 3
-        LOGGER.info("-------------------------");
-        NavigableSet<DatanodeStorageInfo> storages = buildSet(DatanodeStorage.State.NORMAL, even_rack_2[0], even_rack_2[1], even_rack_2[2]);
+        LOGGER.debug("-------------------------");
+        NavigableSet<DatanodeStorageInfo> storages = buildSet(DatanodeStorage.State.NORMAL, type, even_rack_2[0], even_rack_2[1], even_rack_2[2]);
         helpTestchooseReplicasToDelete(3, 0, storages, "unsatisfied removeal", false);
 
         //                  root    --levle 0
@@ -268,8 +273,8 @@ public class TestCrossAZBlockPlacementPolicy {
         //            2      4     --level 2
         //         /\  \    / \  \
         //       2  12 22  4  14  24    --level 3
-        LOGGER.info("-------------------------");
-        storages = buildSet(DatanodeStorage.State.FAILED, even_rack_2[0], even_rack_2[1], even_rack_2[2], even_rack_4[0], even_rack_4[1], even_rack_4[2]);
+        LOGGER.debug("-------------------------");
+        storages = buildSet(DatanodeStorage.State.FAILED, type, even_rack_2[0], even_rack_2[1], even_rack_2[2], even_rack_4[0], even_rack_4[1], even_rack_4[2]);
         helpTestchooseReplicasToDelete(3, 6, storages, "unsatisfied removeal with exceeded and failed node", false);
 
         //                  root    --levle 0
@@ -279,8 +284,8 @@ public class TestCrossAZBlockPlacementPolicy {
         //            2      4     --level 2
         //         /\  \    / \  \
         //       2  12 22  4  14  24    --level 3
-        LOGGER.info("-------------------------");
-        storages = buildSet(DatanodeStorage.State.NORMAL, even_rack_2[0], even_rack_2[1], even_rack_2[2], even_rack_4[0], even_rack_4[1], even_rack_4[2]);
+        LOGGER.debug("-------------------------");
+        storages = buildSet(DatanodeStorage.State.NORMAL, type, even_rack_2[0], even_rack_2[1], even_rack_2[2], even_rack_4[0], even_rack_4[1], even_rack_4[2]);
         helpTestchooseReplicasToDelete(3, 0, storages, "unsatisfied removeal with exceeded node", false);
 
         //                   root             --level 0
@@ -290,8 +295,8 @@ public class TestCrossAZBlockPlacementPolicy {
         //           2       4       1  3   5   --level 2
         //         /\  \    / \  \    \  \   \
         //       2  12 22  4  14  24   1  3  5  --level 3
-        LOGGER.info("-------------------------");
-        storages = buildSet(DatanodeStorage.State.NORMAL, even_rack_2[0], even_rack_2[1], even_rack_2[2], even_rack_4[0], even_rack_4[1], even_rack_4[2], odd_rack_1[0], odd_rack_3[0], odd_rack_5[0]);
+        LOGGER.debug("-------------------------");
+        storages = buildSet(DatanodeStorage.State.NORMAL, type, even_rack_2[0], even_rack_2[1], even_rack_2[2], even_rack_4[0], even_rack_4[1], even_rack_4[2], odd_rack_1[0], odd_rack_3[0], odd_rack_5[0]);
         helpTestchooseReplicasToDelete(3, 0, storages, "satisfied with exceeded node case 1", true);
 
         //                   root             --level 0
@@ -301,8 +306,8 @@ public class TestCrossAZBlockPlacementPolicy {
         //           2       4       1    --level 2
         //         /\  \    / \  \    \
         //       2  12 22  4  14  24   1  --level 3
-        LOGGER.info("-------------------------");
-        storages = buildSet(DatanodeStorage.State.NORMAL, even_rack_2[0], even_rack_2[1], even_rack_2[2], even_rack_4[0], even_rack_4[1], even_rack_4[2], odd_rack_1[0]);
+        LOGGER.debug("-------------------------");
+        storages = buildSet(DatanodeStorage.State.NORMAL, type, even_rack_2[0], even_rack_2[1], even_rack_2[2], even_rack_4[0], even_rack_4[1], even_rack_4[2], odd_rack_1[0]);
         helpTestchooseReplicasToDelete(3, 0, storages, "satisfied with exceeded node case 2", true);
 
         //                   root             --level 0
@@ -312,8 +317,8 @@ public class TestCrossAZBlockPlacementPolicy {
         //           2       4       1    --level 2
         //         /       / \  \    \
         //       2       4  14  24   1  --level 3
-        LOGGER.info("-------------------------");
-        storages = buildSet(DatanodeStorage.State.NORMAL, even_rack_2[0], even_rack_4[0], even_rack_4[1], even_rack_4[2], odd_rack_1[0]);
+        LOGGER.debug("-------------------------");
+        storages = buildSet(DatanodeStorage.State.NORMAL, type, even_rack_2[0], even_rack_4[0], even_rack_4[1], even_rack_4[2], odd_rack_1[0]);
         helpTestchooseReplicasToDelete(3, 0, storages, "satisfied with exceeded node case 2", true);
 
         //                   root             --level 0
@@ -323,8 +328,8 @@ public class TestCrossAZBlockPlacementPolicy {
         //           2       4       1    --level 2
         //         /       / \  \    \
         //       2       4  14  24   1  --level 3
-        LOGGER.info("-------------------------");
-        storages = buildSet(DatanodeStorage.State.NORMAL, even_rack_2[0], even_rack_4[0], even_rack_4[1], even_rack_4[2], odd_rack_1[0]);
+        LOGGER.debug("-------------------------");
+        storages = buildSet(DatanodeStorage.State.NORMAL, type, even_rack_2[0], even_rack_4[0], even_rack_4[1], even_rack_4[2], odd_rack_1[0]);
         helpTestchooseReplicasToDelete(4, 0, storages, "satisfied with exceeded node case 3", false);
 
         //                   root             --level 0
@@ -334,8 +339,8 @@ public class TestCrossAZBlockPlacementPolicy {
         //           2             1    --level 2
         //         /  \            |
         //       2    12           1  --level 3
-        LOGGER.info("-------------------------");
-        storages = buildSet(DatanodeStorage.State.NORMAL, even_rack_2[0], even_rack_2[1], odd_rack_1[0]);
+        LOGGER.debug("-------------------------");
+        storages = buildSet(DatanodeStorage.State.NORMAL, type, even_rack_2[0], even_rack_2[1], odd_rack_1[0]);
         helpTestchooseReplicasToDelete(3, 0, storages, "satisfied with exceeded node case 3", false);
 
         //                   root             --level 0
@@ -345,8 +350,8 @@ public class TestCrossAZBlockPlacementPolicy {
         //           2      4       1    --level 2
         //         /       |       |
         //       2        4       1  --level 3
-        LOGGER.info("-------------------------");
-        storages = buildSet(DatanodeStorage.State.NORMAL, even_rack_2[0], even_rack_4[0], odd_rack_1[0]);
+        LOGGER.debug("-------------------------");
+        storages = buildSet(DatanodeStorage.State.NORMAL, type, even_rack_2[0], even_rack_4[0], odd_rack_1[0]);
         helpTestchooseReplicasToDelete(3, 0, storages, "satisfied with exceeded node case 3", true);
     }
 
@@ -367,14 +372,14 @@ public class TestCrossAZBlockPlacementPolicy {
     @Test
     public void test() {
 
-        LOGGER.info(topology.getDatanodesInRack("/"));
+        LOGGER.debug(topology.getDatanodesInRack("/"));
 
         StorageCluster cluster = new StorageCluster(topology, topology.getLeaves(NodeBase.ROOT));
         //LOGGER.info(cluster.root);
         cluster.children().stream()
                 .map(cluster::find);
-                //.map(Map.Entry::getKey)
-                //.flatMap(Collection::stream)
-                //.forEach(LOGGER::info);
+        //.map(Map.Entry::getKey)
+        //.flatMap(Collection::stream)
+        //.forEach(LOGGER::info);
     }
 }
