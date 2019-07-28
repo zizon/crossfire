@@ -218,27 +218,6 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
         return PLACEMENT_OK;
     }
 
-    protected StorageCluster cluster() {
-        return new StorageCluster(topology, topology.getLeaves(NodeBase.ROOT));
-    }
-
-    protected List<DatanodeStorageInfo> tryRemoveAtNode(
-            StorageCluster.StorageNode node,
-            Map<String, Set<DatanodeStorageInfo>> cluster_by_node,
-            Comparator<DatanodeStorageInfo> evicition_priority) {
-        List<DatanodeStorageInfo> remvoe_candiates = node.leaves()
-                .map(cluster_by_node::get)
-                .flatMap(Collection::stream)
-                .sorted(evicition_priority)
-                .collect(Collectors.toList());
-
-        if (remvoe_candiates.size() <= 1) {
-            return Collections.emptyList();
-        }
-
-        return remvoe_candiates.subList(1, remvoe_candiates.size());
-    }
-
     @Override
     public List<DatanodeStorageInfo> chooseReplicasToDelete(
             Collection<DatanodeStorageInfo> candidates,
@@ -269,7 +248,7 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
 
                 // both not fail,
                 // less usable first
-                return Long.compareUnsigned(left.getRemaining(), right.getRemaining());
+                return Long.compare(left.getRemaining(), right.getRemaining());
             }
 
             // same rack?
@@ -290,16 +269,19 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
 
             // differnt rack in same level
             // node the parent that has more children first
+            Node left_tracking = left_node;
+            Node right_tracking = right_node;
             for (; ; ) {
-                List<Node> left_siblings = constructed.getDatanodesInRack(left_location);
-                List<Node> righ_siblings = constructed.getDatanodesInRack(right_location);
+                List<Node> left_siblings = constructed.getDatanodesInRack(left_tracking.getNetworkLocation());
+                List<Node> righ_siblings = constructed.getDatanodesInRack(right_tracking.getNetworkLocation());
                 compared = -Integer.compare(left_siblings.size(), righ_siblings.size());
                 if (compared != 0) {
                     return compared;
                 }
 
-                String left_parent_location = constructed.getNode(left_location).getNetworkLocation();
-                String right_parent_location = constructed.getNode(right_location).getNetworkLocation();
+
+                String left_parent_location = left_tracking.getParent().getNetworkLocation();
+                String right_parent_location = right_tracking.getParent().getNetworkLocation();
 
                 compared = left_parent_location.compareTo(right_parent_location);
                 if (compared == 0) {
@@ -307,8 +289,8 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                     return left_location.compareTo(right_location);
                 }
 
-                left_location = left_parent_location;
-                right_location = right_parent_location;
+                left_tracking = left_tracking.getParent();
+                right_tracking = right_tracking.getParent();
             }
         };
 

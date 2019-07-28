@@ -121,11 +121,6 @@ public class BenchmarkPlacementPolicy {
     }
 
     @Benchmark
-    public void clusterSetup() {
-        StorageCluster cluster = new StorageCluster(topology,topology.getLeaves(NodeBase.ROOT));
-    }
-
-    @Benchmark
     public void verfiyNormal() {
         //             root      --level 0
         //             /   \

@@ -374,12 +374,5 @@ public class TestCrossAZBlockPlacementPolicy {
 
         LOGGER.debug(topology.getDatanodesInRack("/"));
 
-        StorageCluster cluster = new StorageCluster(topology, topology.getLeaves(NodeBase.ROOT));
-        //LOGGER.info(cluster.root);
-        cluster.children().stream()
-                .map(cluster::find);
-        //.map(Map.Entry::getKey)
-        //.flatMap(Collection::stream)
-        //.forEach(LOGGER::info);
     }
 }
