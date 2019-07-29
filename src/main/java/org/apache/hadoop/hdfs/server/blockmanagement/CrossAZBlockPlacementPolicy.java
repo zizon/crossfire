@@ -2,6 +2,7 @@ package org.apache.hadoop.hdfs.server.blockmanagement;
 
 import com.fs.misc.Promise;
 import com.google.common.base.Strings;
+import jdk.nashorn.internal.runtime.options.Option;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -15,6 +16,7 @@ import org.apache.hadoop.net.NodeBase;
 
 import java.util.*;
 import java.util.function.Supplier;
+import java.util.stream.Collector;
 import java.util.stream.Collectors;
 
 public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
@@ -230,14 +232,57 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
         }
 
         NetworkTopology constructed = new NetworkTopology();
-        Comparator<DatanodeStorageInfo> comparator = (left, right) -> {
+        Comparator<DatanodeStorageInfo> comparator = selectForDelection(constructed);
+
+        Map<String, NavigableSet<DatanodeStorageInfo>> cluster_by_datanode = candidates.stream()
+                .filter(Objects::nonNull)
+                .peek((storage) -> constructed.add(storage.getDatanodeDescriptor()))
+                .collect(Collectors.groupingBy(
+                        (storage) -> storage.getDatanodeDescriptor().getDatanodeUuid(),
+                        Collectors.toCollection(() -> new TreeSet<>(Comparator.comparing(DatanodeStorageInfo::getStorageID)))
+                ));
+
+        int max_eviction = candidates.size() - expected_replica;
+        List<DatanodeStorageInfo> to_remove = new ArrayList<>(max_eviction);
+        for (int i = 0; i < max_eviction; i++) {
+            cluster_by_datanode.values().stream()
+                    .flatMap(Collection::stream)
+                    .min(comparator)
+                    .ifPresent((storage) -> {
+                        // collect it
+                        to_remove.add(storage);
+
+                        // update topology
+                        cluster_by_datanode.compute(
+                                storage.getDatanodeDescriptor().getDatanodeUuid(),
+                                (key, storage_under_node) -> {
+                                    storage_under_node.remove(storage);
+                                    if (storage_under_node.isEmpty()) {
+                                        constructed.remove(storage.getDatanodeDescriptor());
+                                        return null;
+                                    }
+                                    return storage_under_node;
+                                }
+                        );
+                    });
+        }
+
+        if (cluster_by_datanode.values().stream()
+                .flatMap(Collection::stream)
+                .anyMatch((storage) -> storage.getState() != DatanodeStorage.State.FAILED)) {
+            return to_remove;
+        }
+
+        return Collections.emptyList();
+    }
+
+    protected Comparator<DatanodeStorageInfo> selectForDelection(NetworkTopology constructed) {
+        return (left, right) -> {
             DatanodeDescriptor left_node = left.getDatanodeDescriptor();
             DatanodeDescriptor right_node = right.getDatanodeDescriptor();
 
-            int compared = left_node.getDatanodeUuid().compareTo(right_node.getDatanodeUuid());
-
             // same datanode
-            if (compared == 0) {
+            if (left_node.getDatanodeUuid().equals(right_node.getDatanodeUuid())) {
                 // fail node first
                 if (left.getState() == DatanodeStorage.State.FAILED
                         && right.getState() != DatanodeStorage.State.FAILED) {
@@ -254,15 +299,14 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
             // same rack?
             String left_location = left_node.getNetworkLocation();
             String right_location = right_node.getNetworkLocation();
-            compared = left_location.compareTo(right_location);
-            if (compared == 0) {
+            if (left_location.equals(right_location)) {
                 // less space first
                 return -Long.compare(left.getRemaining(), right.getRemaining());
             }
 
             // different rack
             // deeper first
-            compared = -Integer.compare(left_node.getLevel(), right_node.getLevel());
+            int compared = -Integer.compare(left_node.getLevel(), right_node.getLevel());
             if (compared != 0) {
                 return compared;
             }
@@ -279,12 +323,10 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                     return compared;
                 }
 
-
                 String left_parent_location = left_tracking.getParent().getNetworkLocation();
                 String right_parent_location = right_tracking.getParent().getNetworkLocation();
 
-                compared = left_parent_location.compareTo(right_parent_location);
-                if (compared == 0) {
+                if (left_parent_location.equals(right_parent_location)) {
                     // reach same parent, compare by uuid
                     return left_location.compareTo(right_location);
                 }
@@ -293,94 +335,6 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                 right_tracking = right_tracking.getParent();
             }
         };
-
-        // sort nodes
-        List<DatanodeStorageInfo> storges = candidates.stream()
-                .peek((storage) -> constructed.add(storage.getDatanodeDescriptor()))
-                .sorted(comparator)
-                .collect(Collectors.toList());
-        List<DatanodeStorageInfo> log_reference = storges;
-        debugOn(() -> String.format(
-                "initial delete order:[%s]",
-                log_reference.stream().map((node) -> String.format(
-                        "(%s:%s)",
-                        node,
-                        node.getState()
-                )).collect(Collectors.joining(","))
-        ));
-
-        int max_eviction = candidates.size() - expected_replica;
-        List<DatanodeStorageInfo> to_remove = new ArrayList<>(max_eviction);
-        while (to_remove.size() < max_eviction) {
-            if (storges.isEmpty()) {
-                // all removed,something wrong,give up
-                LOGGER.warn("all removed,something wrong,give up");
-                return Collections.emptyList();
-            }
-
-            DatanodeStorageInfo candidate = storges.get(0);
-            to_remove.add(candidate);
-
-            if (storges.size() > 1) {
-                DatanodeStorageInfo next = storges.get(1);
-                if (candidate.getDatanodeDescriptor().getName().compareTo(
-                        next.getDatanodeDescriptor().getName()) != 0) {
-                    // datanode consumed,remove from topology
-                    constructed.remove(candidate.getDatanodeDescriptor());
-                }
-            }
-            // resort
-            List<DatanodeStorageInfo> new_storages = storges.subList(1, storges.size());
-            new_storages.sort(comparator);
-
-            debugOn(() -> String.format(
-                    "select node:(%s) to delete, after delete order:[%s]",
-                    candidate,
-                    new_storages.stream().map((node) -> String.format(
-                            "(%s:%s)",
-                            node,
-                            node.getState()
-                    )).collect(Collectors.joining(","))
-            ));
-
-            storges = new_storages;
-        }
-
-        if (storges.stream().anyMatch((storage) -> storage.getState() != DatanodeStorage.State.FAILED)) {
-            return to_remove;
-        }
-
-        return Collections.emptyList();
-    }
-
-    protected Comparator<DatanodeStorageInfo> evictionPriority(List<StorageType> excess_types,
-                                                               DatanodeDescriptor adde_hint,
-                                                               DatanodeDescriptor delete_hint) {
-        return Comparator.<DatanodeStorageInfo>comparingInt(
-                // fail node first
-                (node) -> node.getState() == DatanodeStorage.State.FAILED ? 0 : 1
-        ).thenComparing(
-                //  exceed type first
-                (node) -> Optional.ofNullable(excess_types)
-                        .map((exceeds) -> exceeds.remove(node.getStorageType()))
-                        .orElse(false)
-                        ? 0 : 1
-        ).thenComparing(
-                // delete hint first
-                (node) -> Optional.ofNullable(delete_hint)
-                        .map((hint) -> hint.compareTo(node.getDatanodeDescriptor()))
-                        .orElse(0) != 0
-                        ? 0 : 1
-        ).thenComparing(
-                // added hint last
-                (node) -> Optional.ofNullable(adde_hint)
-                        .map((hint) -> hint.compareTo(node.getDatanodeDescriptor()))
-                        .orElse(0) == 0
-                        ? 0 : 1
-        ).thenComparing(
-                // less storage first
-                DatanodeStorageInfo::getRemaining
-        );
     }
 
     protected void debugOn(Promise.PromiseSupplier<String> message) {
