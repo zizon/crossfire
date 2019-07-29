@@ -20,13 +20,7 @@ import org.openjdk.jmh.runner.RunnerException;
 import org.openjdk.jmh.runner.options.Options;
 import org.openjdk.jmh.runner.options.OptionsBuilder;
 
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.List;
-import java.util.NavigableSet;
-import java.util.Objects;
-import java.util.TreeSet;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -38,7 +32,7 @@ import java.util.stream.Stream;
 @OutputTimeUnit(TimeUnit.SECONDS)
 public class BenchmarkPlacementPolicy {
 
-    NavigableSet<DatanodeInfo> datanodes;
+    NavigableSet<DatanodeDescriptor> datanodes;
     CrossAZBlockPlacementPolicy policy;
     BlockPlacementPolicy default_policy;
     List<DatanodeStorageInfo> storages;
@@ -78,7 +72,7 @@ public class BenchmarkPlacementPolicy {
                 .collect(Collectors.toList());
         datanodes = storages.stream()
                 .map(DatanodeStorageInfo::getDatanodeDescriptor)
-                .collect(Collectors.toCollection(() -> new TreeSet<>(CrossAZBlockPlacementPolicy.NODE_COMPARATOR)));
+                .collect(Collectors.toCollection(() -> new TreeSet<>(Comparator.comparing(DatanodeDescriptor::getDatanodeUuid))));
 
         policy = new CrossAZBlockPlacementPolicy();
         default_policy = new BlockPlacementPolicyDefault();
@@ -117,7 +111,7 @@ public class BenchmarkPlacementPolicy {
                         .orElse(null)
                 )
                 .filter(Objects::nonNull)
-                .collect(Collectors.toCollection(() -> new TreeSet<>(CrossAZBlockPlacementPolicy.STORAGE_COMPARATOR)));
+                .collect(Collectors.toCollection(() -> new TreeSet<>(Comparator.comparing(DatanodeStorageInfo::getStorageID))));
     }
 
     @Benchmark

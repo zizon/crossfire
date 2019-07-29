@@ -9,6 +9,7 @@ import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
 import org.apache.hadoop.hdfs.server.protocol.StorageReport;
 import org.apache.hadoop.net.NetworkTopology;
+import org.apache.hadoop.net.Node;
 import org.apache.hadoop.net.NodeBase;
 import org.junit.Assert;
 import org.junit.Before;
@@ -25,7 +26,7 @@ public class TestCrossAZBlockPlacementPolicy {
     public static final Log LOGGER = LogFactory.getLog(TestCrossAZBlockPlacementPolicy.class);
 
 
-    NavigableSet<DatanodeInfo> datanodes;
+    NavigableSet<DatanodeDescriptor> datanodes;
     CrossAZBlockPlacementPolicy policy;
     List<DatanodeStorageInfo> storages;
     NetworkTopology topology;
@@ -77,7 +78,7 @@ public class TestCrossAZBlockPlacementPolicy {
                 .collect(Collectors.toList());
         datanodes = storages.stream()
                 .map(DatanodeStorageInfo::getDatanodeDescriptor)
-                .collect(Collectors.toCollection(() -> new TreeSet<>(CrossAZBlockPlacementPolicy.NODE_COMPARATOR)));
+                .collect(Collectors.toCollection(() -> new TreeSet<>(Comparator.comparing(DatanodeDescriptor::getDatanodeUuid))));
 
         policy = new CrossAZBlockPlacementPolicy();
         topology = new NetworkTopology();
@@ -212,10 +213,11 @@ public class TestCrossAZBlockPlacementPolicy {
                         .orElse(null)
                 )
                 .filter(Objects::nonNull)
-                .collect(Collectors.toCollection(() -> new TreeSet<>(CrossAZBlockPlacementPolicy.STORAGE_COMPARATOR)));
+                .collect(Collectors.toCollection(() -> new TreeSet<>(Comparator.comparing(DatanodeStorageInfo::getStorageID))));
     }
 
     protected void helpTestchooseReplicasToDelete(int replica, int failed_nodes, NavigableSet<DatanodeStorageInfo> storages, String messsage, boolean satisfied_after_remove) {
+        LOGGER.debug("-------------------------");
         List<DatanodeStorageInfo> selected = policy.chooseReplicasToDelete(storages, replica, Collections.emptyList(), null, null);
         int allow_to_remove = storages.size() - failed_nodes;
         int expected = allow_to_remove - replica;
@@ -262,7 +264,6 @@ public class TestCrossAZBlockPlacementPolicy {
         //       2              --level 2
         //     / \ \
         //   2  12  22          --level 3
-        LOGGER.debug("-------------------------");
         NavigableSet<DatanodeStorageInfo> storages = buildSet(DatanodeStorage.State.NORMAL, type, even_rack_2[0], even_rack_2[1], even_rack_2[2]);
         helpTestchooseReplicasToDelete(3, 0, storages, "unsatisfied removeal", false);
 
@@ -273,7 +274,6 @@ public class TestCrossAZBlockPlacementPolicy {
         //            2      4     --level 2
         //         /\  \    / \  \
         //       2  12 22  4  14  24    --level 3
-        LOGGER.debug("-------------------------");
         storages = buildSet(DatanodeStorage.State.FAILED, type, even_rack_2[0], even_rack_2[1], even_rack_2[2], even_rack_4[0], even_rack_4[1], even_rack_4[2]);
         helpTestchooseReplicasToDelete(3, 6, storages, "unsatisfied removeal with exceeded and failed node", false);
 
@@ -284,7 +284,6 @@ public class TestCrossAZBlockPlacementPolicy {
         //            2      4     --level 2
         //         /\  \    / \  \
         //       2  12 22  4  14  24    --level 3
-        LOGGER.debug("-------------------------");
         storages = buildSet(DatanodeStorage.State.NORMAL, type, even_rack_2[0], even_rack_2[1], even_rack_2[2], even_rack_4[0], even_rack_4[1], even_rack_4[2]);
         helpTestchooseReplicasToDelete(3, 0, storages, "unsatisfied removeal with exceeded node", false);
 
@@ -295,7 +294,6 @@ public class TestCrossAZBlockPlacementPolicy {
         //           2       4       1  3   5   --level 2
         //         /\  \    / \  \    \  \   \
         //       2  12 22  4  14  24   1  3  5  --level 3
-        LOGGER.debug("-------------------------");
         storages = buildSet(DatanodeStorage.State.NORMAL, type, even_rack_2[0], even_rack_2[1], even_rack_2[2], even_rack_4[0], even_rack_4[1], even_rack_4[2], odd_rack_1[0], odd_rack_3[0], odd_rack_5[0]);
         helpTestchooseReplicasToDelete(3, 0, storages, "satisfied with exceeded node case 1", true);
 
@@ -306,7 +304,6 @@ public class TestCrossAZBlockPlacementPolicy {
         //           2       4       1    --level 2
         //         /\  \    / \  \    \
         //       2  12 22  4  14  24   1  --level 3
-        LOGGER.debug("-------------------------");
         storages = buildSet(DatanodeStorage.State.NORMAL, type, even_rack_2[0], even_rack_2[1], even_rack_2[2], even_rack_4[0], even_rack_4[1], even_rack_4[2], odd_rack_1[0]);
         helpTestchooseReplicasToDelete(3, 0, storages, "satisfied with exceeded node case 2", true);
 
@@ -317,7 +314,6 @@ public class TestCrossAZBlockPlacementPolicy {
         //           2       4       1    --level 2
         //         /       / \  \    \
         //       2       4  14  24   1  --level 3
-        LOGGER.debug("-------------------------");
         storages = buildSet(DatanodeStorage.State.NORMAL, type, even_rack_2[0], even_rack_4[0], even_rack_4[1], even_rack_4[2], odd_rack_1[0]);
         helpTestchooseReplicasToDelete(3, 0, storages, "satisfied with exceeded node case 2", true);
 
@@ -328,7 +324,6 @@ public class TestCrossAZBlockPlacementPolicy {
         //           2       4       1    --level 2
         //         /       / \  \    \
         //       2       4  14  24   1  --level 3
-        LOGGER.debug("-------------------------");
         storages = buildSet(DatanodeStorage.State.NORMAL, type, even_rack_2[0], even_rack_4[0], even_rack_4[1], even_rack_4[2], odd_rack_1[0]);
         helpTestchooseReplicasToDelete(4, 0, storages, "satisfied with exceeded node case 3", false);
 
@@ -339,7 +334,6 @@ public class TestCrossAZBlockPlacementPolicy {
         //           2             1    --level 2
         //         /  \            |
         //       2    12           1  --level 3
-        LOGGER.debug("-------------------------");
         storages = buildSet(DatanodeStorage.State.NORMAL, type, even_rack_2[0], even_rack_2[1], odd_rack_1[0]);
         helpTestchooseReplicasToDelete(3, 0, storages, "satisfied with exceeded node case 3", false);
 
@@ -350,29 +344,77 @@ public class TestCrossAZBlockPlacementPolicy {
         //           2      4       1    --level 2
         //         /       |       |
         //       2        4       1  --level 3
-        LOGGER.debug("-------------------------");
         storages = buildSet(DatanodeStorage.State.NORMAL, type, even_rack_2[0], even_rack_4[0], odd_rack_1[0]);
         helpTestchooseReplicasToDelete(3, 0, storages, "satisfied with exceeded node case 3", true);
     }
 
-    @Test
-    public void testchooseTargetForNewBlock() {
+    protected void helpTestchooseTargetForNewBlock(int replica, Node writer,
+                                                   Set<Node> excludes,
+                                                   long block_size,
+                                                   List<DatanodeDescriptor> favored,
+                                                   boolean expect_optimal) {
+        LOGGER.debug("--------------------------");
         BlockStoragePolicy storage_policy = BlockStoragePolicySuite.createDefaultSuite().getDefaultPolicy();
-        NavigableSet<DatanodeStorageInfo> storages = Arrays.stream(policy.chooseTarget(null, 3, null, null, 12, null, storage_policy))
-                .collect(Collectors.toCollection(() -> new TreeSet<>(CrossAZBlockPlacementPolicy.STORAGE_COMPARATOR)));
+        NavigableSet<DatanodeStorageInfo> storages = Arrays.stream(policy.chooseTarget(null, replica, writer, excludes, 12, favored, storage_policy))
+                .collect(Collectors.toCollection(() -> new TreeSet<>(Comparator.comparing(DatanodeStorageInfo::getStorageID))));
+        Assert.assertTrue("at least one replica", storages.size() >= 1);
         BlockPlacementStatus status = policy.verifyBlockPlacement(
                 storages.stream()
                         .map(DatanodeStorageInfo::getDatanodeDescriptor)
                         .toArray(DatanodeInfo[]::new),
-                3
+                replica
         );
-        Assert.assertTrue(status.getErrorDescription(), status.isPlacementPolicySatisfied());
+        if (expect_optimal) {
+            Assert.assertTrue(String.format(
+                    "should be optimal: reason:%s",
+                    status.getErrorDescription()
+                    ),
+                    status.isPlacementPolicySatisfied()
+            );
+        } else {
+            Assert.assertFalse(String.format(
+                    "should not be optimal: reason:%s",
+                    status.getErrorDescription()
+                    ),
+                    status.isPlacementPolicySatisfied()
+            );
+        }
+    }
+
+    @Test
+    public void testchooseTargetForNewBlock() {
+        // default
+        helpTestchooseTargetForNewBlock(3, null, null, 12, null, true);
+        // default median allocation
+        helpTestchooseTargetForNewBlock(6, null, null, 12, null, true);
+        // default median allocation
+        helpTestchooseTargetForNewBlock(11, null, null, 12, null, true);
+
+        // with writer
+        helpTestchooseTargetForNewBlock(3, datanodes.first(), null, 12, null, false);
+        // median allocation
+        helpTestchooseTargetForNewBlock(6, datanodes.first(), null, 12, null, false);
+        // median allocation
+        helpTestchooseTargetForNewBlock(11, datanodes.first(), null, 12, null, false);
+
+        // with exclude
+        helpTestchooseTargetForNewBlock(3, null, Collections.singleton(new NodeBase("/even")), 12, null, false);
+
+        // with favor
+        helpTestchooseTargetForNewBlock(3, null, Collections.singleton(new NodeBase("/even")), 12, Collections.singletonList(datanodes.first()), false);
+        helpTestchooseTargetForNewBlock(3, null, null, 12, Collections.singletonList(datanodes.first()), true);
     }
 
     @Test
     public void test() {
+        Node node = topology.getLeaves(NodeBase.ROOT).get(0);
+        LOGGER.info(Math.floorDiv(11, 5));
+        LOGGER.debug(NodeBase.getPath(node));
+        Arrays.stream(
+                NodeBase.getPath(node)
+                        .split(NodeBase.PATH_SEPARATOR_STR)
+        ).forEach(LOGGER::debug);
 
-        LOGGER.debug(topology.getDatanodesInRack("/"));
-
+        LOGGER.debug(NodeBase.getPath(node).substring(0, NodeBase.getPath(node).indexOf("/", 1)));
     }
 }
