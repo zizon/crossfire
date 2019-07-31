@@ -20,6 +20,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 public class TestCrossAZBlockPlacementPolicy {
 
@@ -199,6 +200,17 @@ public class TestCrossAZBlockPlacementPolicy {
         helpTestVerifyBlockPlacement(5, false, "not balanced distributed:",
                 even_rack_2[0], even_rack_2[1], even_rack_4[0], even_rack_4[1], even_rack_4[3]
         );
+
+        //             root      --level 0
+        //             /   \
+        //          even   odd    --level 1
+        //         /\      / \
+        //       2  4     1  3    --level 2
+        //       |  |     |  |
+        //      (1)(1)   (1)(1)   --level 3(leaf)
+        helpTestVerifyBlockPlacement(3, true, "over replication:",
+                even_rack_2[0], even_rack_4[0], odd_rack_1[0], odd_rack_3[0]
+        );
     }
 
     protected NavigableSet<DatanodeStorageInfo> buildSet(DatanodeStorage.State state, StorageType type, DatanodeInfo... datanodes) {
@@ -348,7 +360,7 @@ public class TestCrossAZBlockPlacementPolicy {
         helpTestchooseReplicasToDelete(3, 0, storages, "satisfied with exceeded node case 3", true);
     }
 
-    protected void helpTestchooseTargetForNewBlock(int replica, Node writer,
+    protected void helpTestChooseTargetForNewBlock(int replica, Node writer,
                                                    Set<Node> excludes,
                                                    long block_size,
                                                    List<DatanodeDescriptor> favored,
@@ -382,27 +394,147 @@ public class TestCrossAZBlockPlacementPolicy {
     }
 
     @Test
-    public void testchooseTargetForNewBlock() {
+    public void testChooseTargetForNewBlock() {
+        LOGGER.debug(new NetworkTopology().getDatanodesInRack("").size());
         // default
-        helpTestchooseTargetForNewBlock(3, null, null, 12, null, true);
+        helpTestChooseTargetForNewBlock(3, null, null, 12, null, true);
         // default median allocation
-        helpTestchooseTargetForNewBlock(6, null, null, 12, null, true);
+        helpTestChooseTargetForNewBlock(6, null, null, 12, null, true);
         // default median allocation
-        helpTestchooseTargetForNewBlock(11, null, null, 12, null, true);
+        helpTestChooseTargetForNewBlock(11, null, null, 12, null, true);
 
         // with writer
-        helpTestchooseTargetForNewBlock(3, datanodes.first(), null, 12, null, false);
+        helpTestChooseTargetForNewBlock(3, datanodes.first(), null, 12, null, false);
         // median allocation
-        helpTestchooseTargetForNewBlock(6, datanodes.first(), null, 12, null, false);
+        helpTestChooseTargetForNewBlock(6, datanodes.first(), null, 12, null, false);
         // median allocation
-        helpTestchooseTargetForNewBlock(11, datanodes.first(), null, 12, null, false);
+        helpTestChooseTargetForNewBlock(11, datanodes.first(), null, 12, null, false);
 
         // with exclude
-        helpTestchooseTargetForNewBlock(3, null, Collections.singleton(new NodeBase("/even")), 12, null, false);
+        helpTestChooseTargetForNewBlock(3, null, Collections.singleton(new NodeBase("/even")), 12, null, false);
 
         // with favor
-        helpTestchooseTargetForNewBlock(3, null, Collections.singleton(new NodeBase("/even")), 12, Collections.singletonList(datanodes.first()), false);
-        helpTestchooseTargetForNewBlock(3, null, null, 12, Collections.singletonList(datanodes.first()), true);
+        helpTestChooseTargetForNewBlock(3, null, Collections.singleton(new NodeBase("/even")), 12, Collections.singletonList(datanodes.first()), false);
+        helpTestChooseTargetForNewBlock(3, null, null, 12, Collections.singletonList(datanodes.first()), true);
+    }
+
+    protected void helpTestChooseTargetForExisting(boolean optimal, int replica, int additional, Node writer, boolean include_chosen, Set<Node> excludes, DatanodeStorageInfo... chosen) {
+        LOGGER.debug("----------------------");
+        BlockStoragePolicy storage_policy = BlockStoragePolicySuite.createDefaultSuite().getDefaultPolicy();
+        DatanodeStorageInfo[] selected = policy.chooseTarget(null,
+                additional,
+                writer,
+                Arrays.stream(chosen).collect(Collectors.toList()),
+                include_chosen,
+                excludes,
+                12,
+                storage_policy
+        );
+
+        if (include_chosen) {
+            Assert.assertEquals(chosen.length + additional, selected.length);
+        } else {
+            Assert.assertEquals(additional, selected.length);
+        }
+
+        BlockPlacementStatus status = policy.verifyBlockPlacement(
+                Stream.concat(
+                        Arrays.stream(selected)
+                                .map(DatanodeStorageInfo::getDatanodeDescriptor),
+                        Arrays.stream(chosen)
+                                .map(DatanodeStorageInfo::getDatanodeDescriptor)
+                ).toArray(DatanodeInfo[]::new),
+                replica
+        );
+
+        Set<String> multi = Stream.of(
+                Stream.of(writer),
+                Optional.ofNullable(excludes).map(Collection::stream).orElseGet(Stream::empty)
+        ).flatMap(Function.identity())
+                .filter(Objects::nonNull)
+                .map(NodeBase::getPath)
+                .map(policy::toTopRack)
+                .collect(Collectors.toSet());
+
+        if (optimal) {
+            // pipeline patching
+            Assert.assertTrue(status.getErrorDescription(), status.isPlacementPolicySatisfied());
+        } else {
+            // replication patching
+            Assert.assertFalse(status.getErrorDescription(), status.isPlacementPolicySatisfied());
+        }
+    }
+
+    @Test
+    public void testChhooseTragetForExistsingBlock() {
+        DatanodeStorageInfo[] even_rack_2 = buildSet(DatanodeStorage.State.NORMAL, StorageType.SSD, selectSubset("even", "rack_2")).toArray(new DatanodeStorageInfo[0]);
+        DatanodeStorageInfo[] even_rack_4 = buildSet(DatanodeStorage.State.NORMAL, StorageType.SSD, selectSubset("even", "rack_4")).toArray(new DatanodeStorageInfo[0]);
+        DatanodeStorageInfo[] even_rack_6 = buildSet(DatanodeStorage.State.NORMAL, StorageType.SSD, selectSubset("even", "rack_6")).toArray(new DatanodeStorageInfo[0]);
+        DatanodeStorageInfo[] odd_rack_1 = buildSet(DatanodeStorage.State.NORMAL, StorageType.SSD, selectSubset("odd", "rack_1")).toArray(new DatanodeStorageInfo[0]);
+        DatanodeStorageInfo[] odd_rack_3 = buildSet(DatanodeStorage.State.NORMAL, StorageType.SSD, selectSubset("odd", "rack_3")).toArray(new DatanodeStorageInfo[0]);
+        BlockStoragePolicy storage_policy = BlockStoragePolicySuite.createDefaultSuite().getDefaultPolicy();
+
+
+        //             root      --level 0
+        //             /  \
+        //          even  odd    --level 1
+        //         /\    / \
+        //       2  4   1   (?)     --level 2
+        //       |  |   |    |
+        //      (1)(1) (1)  (?)   --level 3,
+        helpTestChooseTargetForExisting(true, 3, 1, null, false, null,
+                even_rack_2[0], even_rack_4[0], odd_rack_1[0]);
+
+        //             root      --level 0
+        //             /  \
+        //          even  odd(x)    --level 1
+        //         /\    / \
+        //       2  4   1   (?)     --level 2
+        //       |  |   |    |
+        //      (1)(1) (1)  (?)   --level 3,
+        helpTestChooseTargetForExisting(false, 3, 1, null, false,
+                Collections.singleton(topology.getNode("/odd")), even_rack_2[0], even_rack_4[0], odd_rack_1[0]);
+
+        //             root      --level 0
+        //             /  \
+        //          even  odd    --level 1
+        //         /\    / \
+        //       2  4   1   (?)     --level 2
+        //       |  |   |    |
+        //      (1)(1) (1)  (?)   --level 3,
+        helpTestChooseTargetForExisting(true, 3, 1, null, true, null,
+                even_rack_2[0], even_rack_4[0], odd_rack_1[0]);
+
+        //             root      --level 0
+        //             /  \
+        //          even  odd(x)    --level 1
+        //         /\    / \
+        //       2  4   1   (?)     --level 2
+        //       |  |   |    |
+        //      (1)(1) (1)  (?)   --level 3,
+        helpTestChooseTargetForExisting(false, 3, 1, null, true,
+                Collections.singleton(topology.getNode("/odd")), even_rack_2[0], even_rack_4[0], odd_rack_1[0]);
+
+        //             root      --level 0
+        //             /  \
+        //          even  odd    --level 1
+        //         /\    / \
+        //       2  4   1   (?)     --level 2
+        //       |  |   |    |
+        //      (1)(1) (1)  (?)   --level 3,
+        helpTestChooseTargetForExisting(true, 3, 1, even_rack_2[0].getDatanodeDescriptor(), false, null,
+                even_rack_2[0], even_rack_4[0], odd_rack_1[0]);
+
+        //             root      --level 0
+        //             /  \
+        //          even  odd    --level 1
+        //         /\    / \
+        //       2  4   1   (?)     --level 2
+        //       |  |   |    |
+        //      (1)(1) (1)  (?)   --level 3,
+        helpTestChooseTargetForExisting(true, 3, 1, topology.getNode(NetworkTopology.DEFAULT_RACK), false, null,
+                even_rack_2[0], even_rack_4[0], odd_rack_1[0]);
+
     }
 
     @Test

@@ -6,7 +6,6 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.protocol.BlockStoragePolicy;
-import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
 import org.apache.hadoop.net.NetworkTopology;
@@ -33,7 +32,7 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
 
         public CrossAZBlockBlockPlacementStatus() {
             this.ok = true;
-            this.reason = () -> "";
+            this.reason = () -> "placement optimal";
         }
 
         public CrossAZBlockBlockPlacementStatus(Promise.PromiseSupplier<String> reason) {
@@ -67,116 +66,58 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
     @Override
     public DatanodeStorageInfo[] chooseTarget(
             String path,
-            int requesting,
+            int additional,
             Node writer,
-            List<DatanodeStorageInfo> chosen,
+            List<DatanodeStorageInfo> provided,
             boolean return_chosen,
-            Set<Node> excludes,
+            Set<Node> exclusion,
             long block_size,
             BlockStoragePolicy storage_policy) {
-        Set<String> top_levels = Stream.of(
-                // writer top level reack
-                Stream.of(maybeToTopLevelRack(writer)),
-                Optional.ofNullable(chosen)
-                        .orElseGet(Collections::emptyList).stream()
+        List<DatanodeStorageInfo> chosen = Optional.ofNullable(provided).orElseGet(Collections::emptyList);
+        Set<Node> excludes = Optional.ofNullable(exclusion).orElseGet(Collections::emptySet);
+
+        // find top level racks
+        Set<String> top_level_racks = Stream.of(
+                // resolve chosen to top level
+                chosen.stream()
                         .map(DatanodeStorageInfo::getDatanodeDescriptor)
-                        .map(this::maybeToTopLevelRack)
+                        .map(this::maybeToTopLevelRack),
+                // resolve write to top level
+                Stream.of(maybeToTopLevelRack(writer)),
+                excludes.stream()
         ).flatMap(Function.identity())
                 .map(NodeBase::getPath)
+                .map(this::toTopRack)
+                // with given rack
+                .filter((rack) -> !rack.equals(NetworkTopology.DEFAULT_RACK))
                 .collect(Collectors.toSet());
 
-        // already in different top level rack
-        if (top_levels.size() > 1) {
-            DatanodeStorageInfo[] selected = chooseTarget(
-                    path,
-                    requesting,
-                    writer,
-                    chosen.stream()
-                            .map(DatanodeStorageInfo::getDatanodeDescriptor)
-                            .collect(Collectors.toCollection(
-                                    () -> new TreeSet<>(Comparator.comparing(NodeBase::getPath)))
-                            ),
-                    block_size,
-                    Collections.emptyList(),
-                    storage_policy
-            );
-
-            if (!return_chosen) {
-                return selected;
-            }
-
-            return Stream.of(
-                    Arrays.stream(selected),
-                    chosen.stream()
-            ).flatMap(Function.identity())
-                    .toArray(DatanodeStorageInfo[]::new);
-        }
-
-        // located in one top rack
-        // if it is from a  replication due to violate of placement
-        // or from client pipeline patching?
-        //TODO
-        
-        return this.chooseTarget(
-                path,
-                requesting,
-                writer,
-                Optional.ofNullable(excludes)
-                        .orElseGet(Collections::emptySet),
-                block_size,
-                Collections.emptyList(),
-                storage_policy
+        // selection root
+        Node selection_root = topology.getNode(top_level_racks.size() > 1
+                ? NodeBase.ROOT
+                : top_level_racks.isEmpty()
+                ? NodeBase.ROOT
+                : top_level_racks.iterator().next()
         );
-    }
-
-
-    /**
-     * call when allocate a totaly new block
-     *
-     * @param path            the block file path
-     * @param num_of_replicas require replica
-     * @param writer          initial writer
-     * @param excludes        exclude nodes
-     * @param block_size      block size
-     * @param favored         favored nodes
-     * @param storage_policy  suggested storage policy
-     * @return selected storage
-     */
-    @Override
-    DatanodeStorageInfo[] chooseTarget(String path,
-                                       int num_of_replicas,
-                                       Node writer,
-                                       Set<Node> excludes,
-                                       long block_size,
-                                       List<DatanodeDescriptor> favored,
-                                       BlockStoragePolicy storage_policy) {
-        Node rack_for_selection = maybeToTopLevelRack(writer);
 
         // preference
-        Set<StorageType> prefer_type = new HashSet<>(storage_policy.chooseStorageTypes((short) num_of_replicas));
-        Set<String> prefer_node = Optional.ofNullable(favored)
-                .orElseGet(Collections::emptyList)
-                .stream()
-                .map(DatanodeID::getDatanodeUuid)
-                .collect(Collectors.toSet());
+        Set<StorageType> prefer_type = new HashSet<>(storage_policy.chooseStorageTypes((short) additional));
         Comparator<DatanodeStorageInfo> prefer = Comparator.<DatanodeStorageInfo>comparingInt(
-                // prefer nodes first
-                (storage) -> prefer_node.contains(storage.getDatanodeDescriptor().getDatanodeUuid()) ? 0 : 1
-        ).thenComparingInt(
                 // prefer suggested storage
                 (storage) -> prefer_type.contains(storage.getStorageType()) ? 0 : 1
-        )// less workload first
-                .thenComparingInt((storage) -> storage.getDatanodeDescriptor().getXceiverCount())
-                // more free space first
-                .thenComparingLong((storage) -> -storage.getRemaining());
+        )// more free space first, round to 100GB
+                .thenComparingLong((storage) -> -storage.getRemaining() / 1024 * 1024 * 1024 * 100)
+                // less workload first
+                .thenComparingInt((storage) -> storage.getDatanodeDescriptor().getXceiverCount());
 
-        // exclusion
-        Set<String> excluded_location = Optional.ofNullable(excludes).orElseGet(Collections::emptySet)
-                .stream()
-                .map(NodeBase::getPath)
-                .collect(Collectors.toSet());
+        NetworkTopology currently_had = new NetworkTopology();
+        chosen.stream().map(DatanodeStorageInfo::getDatanodeDescriptor).forEach(currently_had::add);
 
         // filter for storage
+        Set<String> exclude_expressions = excludes.stream()
+                .map(NodeBase::getPath)
+                .collect(Collectors.toSet());
+        Predicate<String> node_exclude_fileter = (node) -> exclude_expressions.stream().anyMatch(node::startsWith);
         Predicate<DatanodeStorageInfo> storage_filter = (storage) -> {
             // health storage
             if (storage.getState() == DatanodeStorage.State.FAILED) {
@@ -194,19 +135,27 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
             }
 
             String node_path = NodeBase.getPath(storage.getDatanodeDescriptor());
-            boolean is_exclude = excluded_location.stream().anyMatch(node_path::startsWith);
+            boolean selected = currently_had.getNode(node_path) != null;
 
-            return !is_exclude;
+            return !selected;
         };
 
         // select
-        DatanodeStorageInfo[] selected = selectInNode(rack_for_selection, num_of_replicas, storage_filter, prefer)
-                // for safety reason
-                .limit(num_of_replicas)
-                .toArray(DatanodeStorageInfo[]::new);
+        DatanodeStorageInfo[] selected = sealTogether(
+                selectInNode(
+                        selection_root,
+                        additional,
+                        storage_filter,
+                        node_exclude_fileter,
+                        prefer,
+                        currently_had
+                ).limit(additional),
+                chosen.stream(),
+                return_chosen
+        );
 
         debugOn(() -> String.format(
-                "selected:%d/[%s], require:%d, excldue:[%s], favor:[%s], prefer storage type:[%s], block size:%d",
+                "selected:%d/[%s], require:%d, excldue:[%s], provided:[%s]  prefer storage type:[%s], block size:%d",
                 selected.length,
                 Arrays.stream(selected)
                         .map((storage) -> String.format(
@@ -215,9 +164,18 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                                 storage.getDatanodeDescriptor().getNetworkLocation()
                         ))
                         .collect(Collectors.joining(",")),
-                num_of_replicas,
-                excluded_location,
-                prefer_node,
+                additional,
+                excludes.stream()
+                        .map((storage) -> String.format(
+                                "(%s|%s)",
+                                storage,
+                                storage.getNetworkLocation()
+                        )).collect(Collectors.joining(",")),
+                chosen.stream().map((storage) -> String.format(
+                        "(%s|%s)",
+                        storage,
+                        storage.getDatanodeDescriptor().getNetworkLocation()
+                )).collect(Collectors.joining(",")),
                 prefer_type,
                 block_size
         ));
@@ -225,13 +183,17 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
         return selected;
     }
 
-
     @Override
     public BlockPlacementStatus verifyBlockPlacement(DatanodeInfo[] datanodes, int require_replica) {
-        if (datanodes.length < require_replica) {
+        Set<DatanodeInfo> provided = Arrays.stream(datanodes)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toCollection(
+                        () -> new TreeSet<>(Comparator.comparing(DatanodeInfo::getDatanodeUuid)))
+                );
+        if (provided.size() < require_replica) {
             return new CrossAZBlockBlockPlacementStatus(() -> String.format(
                     "not enough storage nodes:[%s], require:%s",
-                    Arrays.stream(datanodes)
+                    provided.stream()
                             .map((node) -> String.format(
                                     "(%s)",
                                     node
@@ -242,14 +204,14 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
         }
 
         NetworkTopology constructed = new NetworkTopology();
-        Arrays.stream(datanodes).forEach(constructed::add);
+        provided.forEach(constructed::add);
 
         // fast path: replica optimal?
         if (require_replica < topology.getNumOfRacks()) {
             // each rack should had one
-            if (constructed.getNumOfRacks() != require_replica) {
+            if (constructed.getNumOfRacks() < require_replica) {
                 return new CrossAZBlockBlockPlacementStatus(() -> String.format(
-                        "placement is not optimal, requrie replica:%d , distinct rack:%d, but place in:%d",
+                        "placement is not optimal, reburied replica:%d , distinct rack:%d, but place in:%d",
                         require_replica,
                         topology.getNumOfRacks(),
                         constructed.getNumOfRacks()
@@ -258,12 +220,12 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
         }
 
         // fast path: datanode optimal?
-        if (datanodes.length < topology.getNumOfRacks()) {
+        if (provided.size() < topology.getNumOfRacks()) {
             // datanode should be place in distinct rack
-            if (constructed.getNumOfRacks() != datanodes.length) {
+            if (constructed.getNumOfRacks() != provided.size()) {
                 return new CrossAZBlockBlockPlacementStatus(() -> String.format(
                         "datanodes:%d can be place in:%d but place:%d",
-                        datanodes.length,
+                        provided.size(),
                         topology.getNumOfRacks(),
                         constructed.getNumOfRacks()
                 ));
@@ -272,7 +234,7 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
 
         // slow path: load balanced test
         Set<String> visited = new HashSet<>();
-        for (DatanodeInfo datanode : datanodes) {
+        for (DatanodeInfo datanode : provided) {
             for (Node tracking = datanode; tracking != null; tracking = tracking.getParent()) {
                 String location = tracking.getNetworkLocation();
                 if (!visited.add(location)) {
@@ -281,12 +243,12 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
 
                 List<Node> placed_group = constructed.getDatanodesInRack(location);
                 List<Node> available_group = topology.getDatanodesInRack(location);
-                List<Node> placed = constructed.getLeaves(location);
+                int placed = constructed.countNumOfAvailableNodes(location, Collections.emptyList());
 
-                if (placed.size() < placed_group.size()) {
+                if (placed < placed_group.size()) {
                     LOGGER.warn(String.format(
                             "expect placed:%d >= placed_group:%d but not",
-                            placed.size(),
+                            placed,
                             placed_group.size()
                     ));
                     continue;
@@ -294,12 +256,12 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
 
                 // expect more groups, available?
                 if (placed_group.size() < available_group.size()
-                        && placed.size() > placed_group.size()) {
+                        && placed > placed_group.size()) {
                     // more group available,not optimal
                     return new CrossAZBlockBlockPlacementStatus(() -> String.format(
                             "location:%s to place:%d in available:%d but placed:%d",
                             location,
-                            placed.size(),
+                            placed,
                             available_group.size(),
                             placed_group.size()
                     ));
@@ -310,7 +272,7 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                 int min_load = 0;
                 int max_load = 0;
                 for (Node group : placed_group) {
-                    int leaves = constructed.getLeaves(NodeBase.getPath(group)).size();
+                    int leaves = constructed.countNumOfAvailableNodes(NodeBase.getPath(group), Collections.emptyList());
                     min_load = Math.min(min_load == 0 ? leaves : min_load, leaves);
                     max_load = Math.max(leaves, max_load);
                 }
@@ -373,7 +335,7 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                         .map((storage) -> {
                             // update topology due to storage removal
                             // since it matters ordering
-                            cluster_by_datanode.compute(
+                            cluster_by_datanode.computeIfPresent(
                                     storage.getDatanodeDescriptor().getDatanodeUuid(),
                                     (key, storage_under_node) -> {
                                         // evict from set
@@ -472,8 +434,11 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
     protected Stream<DatanodeStorageInfo> selectInNode(Node node,
                                                        int expected_selection,
                                                        Predicate<DatanodeStorageInfo> storage_filter,
-                                                       Comparator<DatanodeStorageInfo> prefer) {
-        if (expected_selection == 0) {
+                                                       Predicate<String> node_exclude_filter,
+                                                       Comparator<DatanodeStorageInfo> prefer,
+                                                       NetworkTopology currently_had) {
+        final int allocation_limit = expected_selection;
+        if (expected_selection <= 0) {
             return Stream.empty();
         }
 
@@ -485,47 +450,114 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                     .max(prefer)
                     .map(Stream::of)
                     .orElseGet(Stream::empty)
+                    .peek((storage) -> currently_had.add(storage.getDatanodeDescriptor()))
                     ;
         }
 
+        // check group available
         String path = NodeBase.getPath(node);
-        List<Node> available_group = topology.getDatanodesInRack(path);
-        if (available_group.size() > expected_selection) {
-            // place in distinct group
-            return available_group.stream()
-                    .map((group) -> selectInNode(group, 1, storage_filter, prefer))
-                    .flatMap(Function.identity())
-                    .sorted(prefer)
-                    .limit(expected_selection);
-        }
-
-        // not enough group
+        Set<String> available_group = Optional.ofNullable(topology.getDatanodesInRack(path))
+                .orElseGet(Collections::emptyList).stream()
+                .map(NodeBase::getPath)
+                .filter((group) -> !node_exclude_filter.test(group))
+                .collect(Collectors.toSet());
         if (available_group.size() == 0) {
             return Stream.empty();
         }
 
-        // shuffle
-        Collections.shuffle(available_group, ThreadLocalRandom.current());
+        Map<String, Integer> current_load = Optional.ofNullable(currently_had.getDatanodesInRack(path))
+                .orElseGet(Collections::emptyList).stream()
+                .collect(Collectors.toMap(
+                        NodeBase::getPath,
+                        (maybe_rack) -> currently_had.countNumOfAvailableNodes(
+                                NodeBase.getPath(maybe_rack),
+                                Collections.emptyList()
+                        )
+                ));
 
-        // for each group
-        // 1 = 11 / 5
-        int load = expected_selection / available_group.size();
-        return IntStream.range(0, available_group.size())
-                .mapToObj((group) -> {
-                    if (group + 1 != available_group.size()) {
-                        return selectInNode(available_group.get(group), load, storage_filter, prefer);
-                    }
+        // figure out allocation for each group
+        Map<String, Integer> group_allocation = new HashMap<>();
+        Set<String> new_group = available_group.stream().filter((group) -> !current_load.containsKey(group))
+                .collect(Collectors.toSet());
+        if (!new_group.isEmpty()) {
+            if (expected_selection < new_group.size()) {
+                // can be doen totally in new group
+                return new_group.stream()
+                        .map((group) -> new AbstractMap.SimpleImmutableEntry<>(group, ThreadLocalRandom.current().nextInt()))
+                        .sorted(Comparator.comparingInt(Map.Entry::getValue))
+                        .map((group) -> selectInNode(
+                                topology.getNode(group.getKey()),
+                                1,
+                                storage_filter,
+                                node_exclude_filter,
+                                prefer,
+                                currently_had
+                        ))
+                        .flatMap(Function.identity())
+                        .limit(expected_selection)
+                        ;
+            }
 
-                    // last group
-                    return selectInNode(
-                            available_group.get(group),
-                            load + expected_selection % available_group.size(),
-                            storage_filter,
-                            prefer
-                    );
-                })
+            // fill new groups with at most the same load of currently had
+            // allocation for each group
+            int allocation = expected_selection / new_group.size();
+            int max_load = current_load.values().stream()
+                    .max(Integer::compareTo)
+                    .orElse(0);
+
+            // guard allocation under max load except it is zero
+            int load = max_load > 0 ? Math.min(allocation, max_load) : allocation;
+            new_group.forEach((group) -> group_allocation.put(group, load));
+
+            // calculate tailing
+            expected_selection = expected_selection - load * new_group.size();
+        }
+
+        // available groups are all touched
+        Map<String, Integer> speculate_load = Stream.concat(
+                current_load.entrySet().stream(),
+                group_allocation.entrySet().stream()
+        ).filter((group) -> !node_exclude_filter.test(group.getKey()))
+                .collect(Collectors.groupingBy(
+                        Map.Entry::getKey,
+                        Collectors.collectingAndThen(
+                                Collectors.summarizingInt(Map.Entry::getValue),
+                                (statistics) -> (int) statistics.getSum()
+                        )
+                ));
+
+        // assign
+        IntStream.range(0, expected_selection)
+                .forEach((ignore) -> {
+                    // allocate at least load group
+                    speculate_load.entrySet().stream()
+                            .min(Comparator.comparingInt(Map.Entry::getValue))
+                            .ifPresent((choice) -> {
+                                // allocate
+                                group_allocation.compute(
+                                        choice.getKey(),
+                                        (key, value) -> Optional.ofNullable(value)
+                                                .orElse(0)
+                                                + 1
+                                );
+
+                                // update load map
+                                speculate_load.computeIfPresent(choice.getKey(), (key, value) -> value + 1);
+                            });
+                });
+
+        // drill down
+        return group_allocation.entrySet().stream()
+                .map((allocation) -> selectInNode(
+                        topology.getNode(allocation.getKey()),
+                        allocation.getValue(),
+                        storage_filter,
+                        node_exclude_filter,
+                        prefer,
+                        currently_had
+                ))
                 .flatMap(Function.identity())
-                .limit(expected_selection);
+                .limit(allocation_limit);
     }
 
     protected String toTopRack(String path) {
@@ -547,6 +579,17 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
         }
 
         return rack_for_selection;
+    }
+
+    protected DatanodeStorageInfo[] sealTogether(Stream<DatanodeStorageInfo> must, Stream<DatanodeStorageInfo> maybe, boolean include_maybe) {
+        if (!include_maybe) {
+            return must.toArray(DatanodeStorageInfo[]::new);
+        }
+
+        return Stream.concat(
+                must,
+                maybe
+        ).toArray(DatanodeStorageInfo[]::new);
     }
 
     protected void debugOn(Promise.PromiseSupplier<String> message) {
