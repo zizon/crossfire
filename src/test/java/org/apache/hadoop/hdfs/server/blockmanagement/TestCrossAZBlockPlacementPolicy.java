@@ -482,7 +482,9 @@ public class TestCrossAZBlockPlacementPolicy {
         //       2  4   1   (?)     --level 2
         //       |  |   |    |
         //      (1)(1) (1)  (?)   --level 3,
-        helpTestChooseTargetForExisting(true, 3, 1, null, false, null,
+        helpTestChooseTargetForExisting(true, 3, 1,
+                null, false,
+                null,
                 even_rack_2[0], even_rack_4[0], odd_rack_1[0]);
 
         //             root      --level 0
@@ -492,8 +494,10 @@ public class TestCrossAZBlockPlacementPolicy {
         //       2  4   1   (?)     --level 2
         //       |  |   |    |
         //      (1)(1) (1)  (?)   --level 3,
-        helpTestChooseTargetForExisting(false, 3, 1, null, false,
-                Collections.singleton(topology.getNode("/odd")), even_rack_2[0], even_rack_4[0], odd_rack_1[0]);
+        helpTestChooseTargetForExisting(false, 3, 1,
+                null, false,
+                Collections.singleton(topology.getNode("/odd")),
+                even_rack_2[0], even_rack_4[0], odd_rack_1[0]);
 
         //             root      --level 0
         //             /  \
@@ -502,7 +506,9 @@ public class TestCrossAZBlockPlacementPolicy {
         //       2  4   1   (?)     --level 2
         //       |  |   |    |
         //      (1)(1) (1)  (?)   --level 3,
-        helpTestChooseTargetForExisting(true, 3, 1, null, true, null,
+        helpTestChooseTargetForExisting(true, 3, 1,
+                null, true,
+                null,
                 even_rack_2[0], even_rack_4[0], odd_rack_1[0]);
 
         //             root      --level 0
@@ -512,17 +518,9 @@ public class TestCrossAZBlockPlacementPolicy {
         //       2  4   1   (?)     --level 2
         //       |  |   |    |
         //      (1)(1) (1)  (?)   --level 3,
-        helpTestChooseTargetForExisting(false, 3, 1, null, true,
-                Collections.singleton(topology.getNode("/odd")), even_rack_2[0], even_rack_4[0], odd_rack_1[0]);
-
-        //             root      --level 0
-        //             /  \
-        //          even  odd    --level 1
-        //         /\    / \
-        //       2  4   1   (?)     --level 2
-        //       |  |   |    |
-        //      (1)(1) (1)  (?)   --level 3,
-        helpTestChooseTargetForExisting(true, 3, 1, even_rack_2[0].getDatanodeDescriptor(), false, null,
+        helpTestChooseTargetForExisting(false, 3, 1,
+                null, true,
+                Collections.singleton(topology.getNode("/odd")),
                 even_rack_2[0], even_rack_4[0], odd_rack_1[0]);
 
         //             root      --level 0
@@ -532,9 +530,77 @@ public class TestCrossAZBlockPlacementPolicy {
         //       2  4   1   (?)     --level 2
         //       |  |   |    |
         //      (1)(1) (1)  (?)   --level 3,
-        helpTestChooseTargetForExisting(true, 3, 1, topology.getNode(NetworkTopology.DEFAULT_RACK), false, null,
+        helpTestChooseTargetForExisting(true, 3, 1,
+                even_rack_2[0].getDatanodeDescriptor(), false,
+                null,
                 even_rack_2[0], even_rack_4[0], odd_rack_1[0]);
 
+        //             root      --level 0
+        //             /  \
+        //          even  odd    --level 1
+        //         /\    / \
+        //       2  4   1   (?)     --level 2
+        //       |  |   |    |
+        //      (1)(1) (1)  (?)   --level 3,
+        helpTestChooseTargetForExisting(true, 3, 1,
+                topology.getNode(NetworkTopology.DEFAULT_RACK), false,
+                null,
+                even_rack_2[0], even_rack_4[0], odd_rack_1[0]);
+
+        //             root      --level 0
+        helpTestChooseTargetForExisting(true, 3, 3,
+                topology.getNode(NetworkTopology.DEFAULT_RACK), false,
+                null);
+
+        //             root      --level 0
+        helpTestChooseTargetForExisting(true, 3, 3,
+                null, false,
+                null);
+
+        //             root      --level 0
+        helpTestChooseTargetForExisting(false, 3, 3,
+                even_rack_2[0].getDatanodeDescriptor(), false,
+                null);
+
+        //             root      --level 0
+        //             /  \
+        //          even  odd    --level 1
+        //         /\    / \
+        //       4
+        helpTestChooseTargetForExisting(false, 3, 2,
+                even_rack_2[0].getDatanodeDescriptor(), false,
+                null,
+                even_rack_4[0]);
+
+        //             root      --level 0
+        //             /  \
+        //          even  odd    --level 1
+        //         /\    / \
+        //       4
+        helpTestChooseTargetForExisting(false, 3, 2,
+                even_rack_2[0].getDatanodeDescriptor(), true,
+                null,
+                even_rack_4[0]);
+
+        //             root      --level 0
+        //             /  \
+        //          even  odd    --level 1
+        //         /\    / \
+        //       4
+        helpTestChooseTargetForExisting(false, 3, 1,
+                even_rack_2[0].getDatanodeDescriptor(), false,
+                null,
+                even_rack_4[0], even_rack_4[1]);
+
+        //             root      --level 0
+        //             /  \
+        //          even  odd    --level 1
+        //         /\    / \
+        //       4
+        helpTestChooseTargetForExisting(false, 3, 2,
+                even_rack_2[0].getDatanodeDescriptor(), false,
+                null,
+                even_rack_4[0], even_rack_4[1]);
     }
 
     @Test

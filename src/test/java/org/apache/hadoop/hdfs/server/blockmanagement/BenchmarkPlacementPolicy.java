@@ -6,26 +6,20 @@ import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
+import org.apache.hadoop.hdfs.server.protocol.StorageReport;
 import org.apache.hadoop.net.NetworkTopology;
-import org.apache.hadoop.net.NodeBase;
-import org.openjdk.jmh.annotations.Benchmark;
-import org.openjdk.jmh.annotations.BenchmarkMode;
-import org.openjdk.jmh.annotations.Mode;
-import org.openjdk.jmh.annotations.OutputTimeUnit;
-import org.openjdk.jmh.annotations.Scope;
-import org.openjdk.jmh.annotations.Setup;
-import org.openjdk.jmh.annotations.State;
+import org.openjdk.jmh.annotations.*;
 import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.RunnerException;
 import org.openjdk.jmh.runner.options.Options;
 import org.openjdk.jmh.runner.options.OptionsBuilder;
 
 import java.util.*;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
-import java.util.stream.Stream;
 
 @State(Scope.Benchmark)
 @BenchmarkMode(Mode.Throughput)
@@ -57,16 +51,36 @@ public class BenchmarkPlacementPolicy {
                     DatanodeID id = new DatanodeID(ip, hostname, UUID.randomUUID().toString(), 0, 0, 0, 0);
                     DatanodeDescriptor datanode = new DatanodeDescriptor(id, location);
 
-                    Stream.Builder<DatanodeStorageInfo> builder = Stream.builder();
-                    for (DatanodeStorage.State state : DatanodeStorage.State.values()) {
-                        for (StorageType type : StorageType.values()) {
-                            DatanodeStorage storage = new DatanodeStorage(DatanodeStorage.generateUuid(), state, type);
-                            builder.accept(new DatanodeStorageInfo(datanode, storage));
-                        }
-                    }
+                    datanode.updateHeartbeat(
+                            Arrays.stream(DatanodeStorage.State.values())
+                                    .flatMap((state) ->
+                                            Arrays.stream(StorageType.values())
+                                                    .map((type) -> {
+                                                                DatanodeStorageInfo info = new DatanodeStorageInfo(
+                                                                        datanode,
+                                                                        new DatanodeStorage(
+                                                                                DatanodeStorage.generateUuid(),
+                                                                                state,
+                                                                                type
+                                                                        )
+                                                                );
+
+                                                                long capacity = ThreadLocalRandom.current().nextLong(1024L * 1024L * 1024L * 1024L * 2L);
+                                                                long used = ThreadLocalRandom.current().nextLong(capacity);
+                                                                info.setUtilizationForTesting(capacity, used, capacity - used, ThreadLocalRandom.current().nextLong(used));
+                                                                return info.toStorageReport();
+                                                            }
+                                                    )
+                                    ).toArray(StorageReport[]::new),
+                            0,
+                            0,
+                            ThreadLocalRandom.current().nextInt(40),
+                            0,
+                            null
+                    );
 
                     //DatanodeStorage storage = new DatanodeStorage();
-                    return builder.build();
+                    return Arrays.stream(datanode.getStorageInfos());
                 })
                 .flatMap(Function.identity())
                 .collect(Collectors.toList());
@@ -74,12 +88,35 @@ public class BenchmarkPlacementPolicy {
                 .map(DatanodeStorageInfo::getDatanodeDescriptor)
                 .collect(Collectors.toCollection(() -> new TreeSet<>(Comparator.comparing(DatanodeDescriptor::getDatanodeUuid))));
 
+
         policy = new CrossAZBlockPlacementPolicy();
         default_policy = new BlockPlacementPolicyDefault();
         topology = new NetworkTopology();
         datanodes.forEach(topology::add);
         policy.initialize(null, null, topology, null);
-        default_policy.initialize(new Configuration(), null, topology, null);
+
+        default_policy.initialize(new Configuration(), new FSClusterStats() {
+
+            @Override
+            public int getTotalLoad() {
+                return 0;
+            }
+
+            @Override
+            public boolean isAvoidingStaleDataNodesForWrite() {
+                return false;
+            }
+
+            @Override
+            public int getNumDatanodesInService() {
+                return datanodes.size();
+            }
+
+            @Override
+            public double getInServiceXceiverAverage() {
+                return 0;
+            }
+        }, topology, null);
 
         even = selectSubset("even", "");
         odd = selectSubset("odd", "");
@@ -115,6 +152,56 @@ public class BenchmarkPlacementPolicy {
     }
 
     @Benchmark
+    public void chooseTarget() {
+        DatanodeStorageInfo[] selected = policy.chooseTarget(null,
+                3,
+                null,
+                Collections.emptyList(),
+                true,
+                Collections.emptySet(),
+                12,
+                BlockStoragePolicySuite.createDefaultSuite().getDefaultPolicy()
+        );
+    }
+
+    @Benchmark
+    public void chooseTargetDefault() {
+        default_policy.chooseTarget(null,
+                3,
+                null,
+                new HashSet<>(),
+                12,
+                new ArrayList<>(),
+                BlockStoragePolicySuite.createDefaultSuite().getDefaultPolicy()
+        );
+    }
+
+    @Benchmark
+    public void chooseTargetWithWriter() {
+        policy.chooseTarget(null,
+                3,
+                datanodes.first(),
+                Collections.emptyList(),
+                true,
+                Collections.emptySet(),
+                12,
+                BlockStoragePolicySuite.createDefaultSuite().getDefaultPolicy()
+        );
+    }
+
+    @Benchmark
+    public void chooseTargetDefaultWithWriter() {
+        default_policy.chooseTarget(null,
+                3,
+                datanodes.first(),
+                new HashSet<>(),
+                12,
+                new ArrayList<>(),
+                BlockStoragePolicySuite.createDefaultSuite().getDefaultPolicy()
+        );
+    }
+
+    //@Benchmark
     public void verfiyNormal() {
         //             root      --level 0
         //             /   \
@@ -128,7 +215,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    @Benchmark
+    //@Benchmark
     public void verifyExceed() {
         //             root      --level 0
         //             /   \
@@ -142,7 +229,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    @Benchmark
+    //@Benchmark
     public void verfiyDangle() {
         //             root      --level 0
         //             /   \
@@ -156,7 +243,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    @Benchmark
+    //@Benchmark
     public void verfiyNormalDefault() {
         //             root      --level 0
         //             /   \
@@ -171,7 +258,7 @@ public class BenchmarkPlacementPolicy {
 
     }
 
-    @Benchmark
+    //@Benchmark
     public void verifyExceedDefault() {
         //             root      --level 0
         //             /   \
@@ -185,7 +272,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    @Benchmark
+    //@Benchmark
     public void verfiyDangleDefault() {
         //             root      --level 0
         //             /   \
@@ -199,7 +286,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    @Benchmark
+    //@Benchmark
     public void chooseReplicasToDelete() {
         //                   root             --level 0
         //                /      \
@@ -212,7 +299,7 @@ public class BenchmarkPlacementPolicy {
         policy.chooseReplicasToDelete(storages, 3, Collections.emptyList(), null, null);
     }
 
-    @Benchmark
+    //@Benchmark
     public void chooseReplicasToDeleteDefault() {
         //                   root             --level 0
         //                /      \
@@ -226,13 +313,23 @@ public class BenchmarkPlacementPolicy {
     }
 
     public static void main(String[] args) throws RunnerException {
+
         Options opt = new OptionsBuilder()
                 .include(BenchmarkPlacementPolicy.class.getSimpleName())
                 .warmupIterations(0)
                 .measurementIterations(2)
                 .forks(1)
                 .build();
-
         new Runner(opt).run();
+
+
+/*
+        BenchmarkPlacementPolicy benchmark = new BenchmarkPlacementPolicy();
+        benchmark.setup();
+        for (; ; ) {
+            benchmark.chooseTargetDefaultWithWriter();
+        }
+        */
+
     }
 }
