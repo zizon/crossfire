@@ -23,7 +23,7 @@ public abstract class ReconfigurableServicePlugin implements ServicePlugin {
 
     public static final String RECONFIGURATION_KEY = "reconfig";
 
-    public static final String TEMPLATE_NAME = "reconfigurate_plugin.html";
+    public static final String TEMPLATE_NAME = "reconfigurable-plugin.html";
 
     public static class ReloadableServlet extends HttpServlet {
 
@@ -42,7 +42,7 @@ public abstract class ReconfigurableServicePlugin implements ServicePlugin {
             try {
                 ReconfigurableServicePlugin reconfigurable = plugin(request);
                 if (reload) {
-                    reconfigurable.doReconfigurate();
+                    reconfigurable.doReconfigurate(request);
                 }
 
                 // check response style
@@ -50,21 +50,16 @@ public abstract class ReconfigurableServicePlugin implements ServicePlugin {
                         .orElse("html")
                         .equalsIgnoreCase("json");
 
-                String content = new GsonBuilder()
-                        .setPrettyPrinting()
-                        .create()
-                        .toJson(reconfigurable.render());
+                String content = reconfigurable.render();
                 if (json) {
                     response.setContentType("application/json");
                     response.getWriter().print(content);
                     return;
                 }
 
-                // if api access
-                //reconfigurable.renderOk(response);
                 response.setContentType("text/html");
                 response.getWriter().print(
-                        loadTemplate()
+                        loadTemplate(request)
                                 .replaceAll("__JSON_TEMPLATE__", content)
                                 .replaceAll("__RECONFIG_PATH__", request.getServletPath())
                 );
@@ -84,27 +79,38 @@ public abstract class ReconfigurableServicePlugin implements ServicePlugin {
         return RECONFIGURATION_KEY + "/" + name;
     }
 
-    protected static String loadTemplate() {
-        try (ReadableByteChannel channel = Channels.newChannel(
-                Thread.currentThread().getContextClassLoader().getResourceAsStream(TEMPLATE_NAME))
-        ) {
-            ByteBuffer content = ByteBuffer.allocate(4096);
-            while (channel.read(content) != -1) {
-                if (!content.hasRemaining()) {
-                    ByteBuffer copy = ByteBuffer.allocate(content.capacity() + 1024);
-                    content.flip();
-                    copy.put(content);
-                    content = copy;
-                }
-            }
+    protected static String loadTemplate(HttpServletRequest request) {
+        String plugin_name = request.getServletPath().substring(1);
+        return Optional.ofNullable(Thread.currentThread()
+                .getContextClassLoader()
+                .getResourceAsStream(
+                        String.format(
+                                "%s-%s",
+                                plugin_name,
+                                TEMPLATE_NAME
+                        )
+                ))
+                .map((stream) -> {
+                    try (ReadableByteChannel channel = Channels.newChannel(stream)) {
+                        ByteBuffer content = ByteBuffer.allocate(4096);
+                        while (channel.read(content) != -1) {
+                            if (!content.hasRemaining()) {
+                                ByteBuffer copy = ByteBuffer.allocate(content.capacity() + 1024);
+                                content.flip();
+                                copy.put(content);
+                                content = copy;
+                            }
+                        }
 
-            // to read mode
-            content.flip();
+                        // to read mode
+                        content.flip();
 
-            return new String(content.array(), content.position(), content.limit());
-        } catch (Throwable e) {
-            throw new UncheckedIOException(new IOException("fail to load resource:" + TEMPLATE_NAME, e));
-        }
+                        return new String(content.array(), content.position(), content.limit());
+                    } catch (Throwable e) {
+                        throw new UncheckedIOException(new IOException("fail to load resource:" + TEMPLATE_NAME, e));
+                    }
+                })
+                .orElse("");
     }
 
     @Override
@@ -133,7 +139,7 @@ public abstract class ReconfigurableServicePlugin implements ServicePlugin {
 
     @Override
     public void stop() {
-        LOGGER.warn("no action for stop");
+        LOGGER.info("no action for stop");
     }
 
     @Override
@@ -141,13 +147,13 @@ public abstract class ReconfigurableServicePlugin implements ServicePlugin {
         this.stop();
     }
 
-    protected abstract void doReconfigurate() throws Throwable;
+    protected abstract void doReconfigurate(HttpServletRequest request) throws Throwable;
 
     protected abstract String name();
 
     protected abstract HttpServer2 findHttpServer() throws Throwable;
 
-    protected abstract List<List<String>> render();
+    protected abstract String render();
 
     protected HttpServer2 http() {
         return http;

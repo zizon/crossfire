@@ -1,5 +1,6 @@
 package com.sf.hadoop;
 
+import com.google.gson.GsonBuilder;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
@@ -18,6 +19,7 @@ import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.http.HttpServer2;
 import org.apache.hadoop.net.DNSToSwitchMapping;
 
+import javax.servlet.http.HttpServletRequest;
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.util.List;
@@ -50,7 +52,7 @@ public class DNSToSwitchMappingReloadServicePlugin extends ReconfigurableService
     }
 
     @Override
-    protected void doReconfigurate() {
+    protected void doReconfigurate(HttpServletRequest request) {
         LOGGER.info("reload rack resolver :" + this.mapping + " ...");
         DNSToSwitchMapping mapping = this.mapping;
         if (mapping == null) {
@@ -68,29 +70,33 @@ public class DNSToSwitchMappingReloadServicePlugin extends ReconfigurableService
 
             NamespaceInfo namespace = namenode.getFSImage().getStorage().getNamespaceInfo();
             FSNamesystem namesystem = namenode.getNamesystem();
-            for (DatanodeDescriptor datanode : manager.getDatanodeListForReport(HdfsConstants.DatanodeReportType.LIVE)) {
-                DatanodeRegistration registration = new DatanodeRegistration(
-                        datanode,
-                        new StorageInfo(
-                                HdfsConstants.DATANODE_LAYOUT_VERSION,
-                                namespace.getNamespaceID(),
-                                namespace.getClusterID(),
-                                namespace.getCTime(),
-                                HdfsServerConstants.NodeType.DATA_NODE
-                        ),
-                        new ExportedBlockKeys(),
-                        datanode.getSoftwareVersion()
-                );
-
-                try {
-                    namesystem.writeLock();
-                    manager.registerDatanode(registration);
-                    LOGGER.info("refresh datanode:" + registration);
-                } catch (UnresolvedTopologyException | DisallowedDatanodeException e) {
-                    LOGGER.warn("refresh datanode fail:" + registration);
-                } finally {
-                    namesystem.writeUnlock();
-                }
+            try {
+                namesystem.writeLock();
+                manager.getDatanodeListForReport(HdfsConstants.DatanodeReportType.LIVE).stream()
+                        .forEach((datanode) -> {
+                            DatanodeRegistration registration = new DatanodeRegistration(
+                                    datanode,
+                                    new StorageInfo(
+                                            HdfsConstants.DATANODE_LAYOUT_VERSION,
+                                            namespace.getNamespaceID(),
+                                            namespace.getClusterID(),
+                                            namespace.getCTime(),
+                                            HdfsServerConstants.NodeType.DATA_NODE
+                                    ),
+                                    new ExportedBlockKeys(),
+                                    datanode.getSoftwareVersion()
+                            );
+                            try {
+                                manager.registerDatanode(registration);
+                                LOGGER.info("refresh datanode:" + registration);
+                            } catch (UnresolvedTopologyException | DisallowedDatanodeException e) {
+                                LOGGER.warn("refresh datanode fail:" + registration);
+                            }
+                        });
+            } catch (Throwable e) {
+                LOGGER.error("unexpected expcetion when reloading datanodes", e);
+            } finally {
+                namesystem.writeUnlock();
             }
         }
     }
@@ -118,20 +124,24 @@ public class DNSToSwitchMappingReloadServicePlugin extends ReconfigurableService
     }
 
     @Override
-    protected List<List<String>> render() {
+    protected String render() {
         NameNode namenode = (NameNode) service();
-        return namenode.getNamesystem()
-                .getBlockManager()
-                .getDatanodeManager()
-                .getDatanodeListForReport(HdfsConstants.DatanodeReportType.LIVE)
-                .parallelStream()
-                .map((datanode) ->
-                        Stream.of(
-                                datanode.getIpAddr(),
-                                datanode.getHostName(),
-                                datanode.getNetworkLocation()
-                        ).collect(Collectors.toList())
-                )
-                .collect(Collectors.toList());
+        return new GsonBuilder()
+                .setPrettyPrinting()
+                .create()
+                .toJson(namenode.getNamesystem()
+                        .getBlockManager()
+                        .getDatanodeManager()
+                        .getDatanodeListForReport(HdfsConstants.DatanodeReportType.LIVE)
+                        .stream()
+                        .map((datanode) ->
+                                Stream.of(
+                                        datanode.getIpAddr(),
+                                        datanode.getHostName(),
+                                        datanode.getNetworkLocation()
+                                ).collect(Collectors.toList())
+                        )
+                        .collect(Collectors.toList())
+                );
     }
 }
