@@ -4,11 +4,22 @@ import com.google.gson.GsonBuilder;
 import com.sf.hadoop.DNSToSwitchMappingReloadServicePlugin;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.commons.logging.impl.Jdk14Logger;
+import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
+import org.apache.hadoop.http.HttpServer2;
+import org.apache.hadoop.log.LogLevel;
+import org.apache.hadoop.util.ServletUtil;
 
+import javax.servlet.*;
 import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import javax.swing.text.html.Option;
+import java.io.IOException;
+import java.io.PrintWriter;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Field;
@@ -21,6 +32,39 @@ import java.util.stream.Collectors;
 public class CrossAZBlockPlacementPolicyPlugin extends DNSToSwitchMappingReloadServicePlugin {
 
     public static final Log LOGGER = LogFactory.getLog(CrossAZBlockPlacementPolicyPlugin.class);
+
+    public static class LogServlet extends LogLevel.Servlet {
+
+        @Override
+        public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
+            Configuration conf = (Configuration) this.getServletContext()
+                    .getAttribute(HttpServer2.CONF_CONTEXT_ATTRIBUTE);
+
+            boolean security_on = conf.getBoolean(
+                    CommonConfigurationKeys.HADOOP_SECURITY_AUTHORIZATION,
+                    false
+            );
+
+            if (security_on) {
+                // security enable, temporary disable
+                conf.setBoolean(CommonConfigurationKeys.HADOOP_SECURITY_AUTHORIZATION, false);
+            }
+
+            try {
+                super.doGet(request, response);
+            } catch (IOException | ServletException exception) {
+                throw new IOException(exception);
+            } finally {
+                // re-enable
+                if (security_on) {
+                    conf.setBoolean(
+                            CommonConfigurationKeys.HADOOP_SECURITY_AUTHORIZATION,
+                            true
+                    );
+                }
+            }
+        }
+    }
 
     protected NameNode namenode;
     protected Configuration configuration;
@@ -42,6 +86,12 @@ public class CrossAZBlockPlacementPolicyPlugin extends DNSToSwitchMappingReloadS
 
         this.namenode = (NameNode) service;
         this.configuration = stealNamenodeConfiguration();
+
+        // special hack for log level config,
+        // to bypass security check
+        if (configuration.getBoolean(CommonConfigurationKeys.HADOOP_SECURITY_AUTHORIZATION, false)) {
+            http().addServlet("logLevel", "/logLevel", LogServlet.class);
+        }
 
         // learn and setup policy
         BlockManager block_manager = namenode.getNamesystem().getBlockManager();
