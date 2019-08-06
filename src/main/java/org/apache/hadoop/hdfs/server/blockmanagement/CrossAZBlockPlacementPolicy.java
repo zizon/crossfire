@@ -157,7 +157,7 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
         if (selected.length < additional) {
             // more needed
             LOGGER.warn(String.format(
-                    "expect %d datanodes but allocate only:%d/[%s], path:%s writer:%s provided:[%s] exclusion:[%s]",
+                    "expect %d datanodes but allocate only:%d/[%s], path:%s writer:%s/%s provided:[%s] exclusion:[%s]",
                     additional,
                     selected.length,
                     Arrays.stream(selected)
@@ -169,6 +169,7 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                             .collect(Collectors.joining(",")),
                     path,
                     writer,
+                    writer.getNetworkLocation(),
                     chosen.stream()
                             .map((storage) -> String.format(
                                     "(%s|%s)",
