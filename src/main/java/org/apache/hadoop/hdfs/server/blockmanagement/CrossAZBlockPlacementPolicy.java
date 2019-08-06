@@ -193,6 +193,21 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
         }
 
         DatanodeStorageInfo[] final_selected = selected;
+        if (final_selected.length < additional) {
+            LOGGER.warn(String.format(
+                    "still lack of storage for allocation:%d, got:%d/[%s]",
+                    additional,
+                    final_selected.length,
+                    Arrays.stream(final_selected)
+                            .map((storage) -> String.format(
+                                    "(%s|%s)",
+                                    storage,
+                                    storage.getDatanodeDescriptor().getNetworkLocation()
+                            ))
+                            .collect(Collectors.joining(","))
+            ));
+        }
+
         debugOn(() -> String.format(
                 "selected:%d/[%s], require:%d, excldue:[%s], provided:[%s]  prefer storage type:[%s], block size:%d",
                 final_selected.length,
@@ -218,21 +233,6 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                 prefer_type,
                 block_size
         ));
-
-        if (final_selected.length < additional) {
-            LOGGER.warn(String.format(
-                    "still lack of storage for allocation:%d, got:%d/[%s]",
-                    additional,
-                    final_selected.length,
-                    Arrays.stream(final_selected)
-                            .map((storage) -> String.format(
-                                    "(%s|%s)",
-                                    storage,
-                                    storage.getDatanodeDescriptor().getNetworkLocation()
-                            ))
-                            .collect(Collectors.joining(","))
-            ));
-        }
 
         return final_selected;
     }

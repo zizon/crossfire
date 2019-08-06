@@ -22,6 +22,7 @@ import javax.servlet.http.HttpServletRequest;
 import java.lang.reflect.Field;
 import java.util.Collections;
 import java.util.Iterator;
+import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -64,8 +65,9 @@ public class DNSToSwitchMappingReloadServicePlugin extends ReconfigurableService
                     .getBlockManager()
                     .getDatanodeManager();
 
+            // trigger evaluation
             NamespaceInfo namespace = namenode.getFSImage().getStorage().getNamespaceInfo();
-            Iterator<DatanodeRegistration> iterator = manager.getDatanodeListForReport(HdfsConstants.DatanodeReportType.LIVE).parallelStream()
+            List<DatanodeRegistration> registrations = manager.getDatanodeListForReport(HdfsConstants.DatanodeReportType.LIVE).parallelStream()
                     // reload mapping
                     .peek((datanode) -> Stream.of(
                             datanode.getIpAddr(),
@@ -87,14 +89,14 @@ public class DNSToSwitchMappingReloadServicePlugin extends ReconfigurableService
                                     new ExportedBlockKeys(),
                                     datanode.getSoftwareVersion()
                             )
-                    ).iterator();
+                    )
+                    .collect(Collectors.toList());
 
             // finner lock acquisition
             FSNamesystem namesystem = namenode.getNamesystem();
             try {
                 namesystem.writeLock();
-                while (iterator.hasNext()) {
-                    DatanodeRegistration registration = iterator.next();
+                for (DatanodeRegistration registration : registrations) {
                     try {
                         manager.registerDatanode(registration);
                     } catch (UnresolvedTopologyException | DisallowedDatanodeException e) {
