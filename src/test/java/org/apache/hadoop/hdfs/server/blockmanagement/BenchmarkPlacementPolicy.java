@@ -151,7 +151,7 @@ public class BenchmarkPlacementPolicy {
                 .collect(Collectors.toCollection(() -> new TreeSet<>(Comparator.comparing(DatanodeStorageInfo::getStorageID))));
     }
 
-    @Benchmark
+    //@Benchmark
     public void chooseTarget() {
         DatanodeStorageInfo[] selected = policy.chooseTarget(null,
                 3,
@@ -164,7 +164,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    @Benchmark
+    //@Benchmark
     public void chooseTargetDefault() {
         default_policy.chooseTarget(null,
                 3,
@@ -176,7 +176,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    @Benchmark
+    //@Benchmark
     public void chooseTargetWithWriter() {
         policy.chooseTarget(null,
                 3,
@@ -189,7 +189,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    @Benchmark
+    //@Benchmark
     public void chooseTargetDefaultWithWriter() {
         default_policy.chooseTarget(null,
                 3,
@@ -201,7 +201,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    //@Benchmark
+    @Benchmark
     public void verfiyNormal() {
         //             root      --level 0
         //             /   \
@@ -243,7 +243,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    //@Benchmark
+    @Benchmark
     public void verfiyNormalDefault() {
         //             root      --level 0
         //             /   \
@@ -313,7 +313,6 @@ public class BenchmarkPlacementPolicy {
     }
 
     public static void main(String[] args) throws RunnerException {
-
         Options opt = new OptionsBuilder()
                 .include(BenchmarkPlacementPolicy.class.getSimpleName())
                 .warmupIterations(0)
@@ -321,15 +320,5 @@ public class BenchmarkPlacementPolicy {
                 .forks(1)
                 .build();
         new Runner(opt).run();
-
-
-/*
-        BenchmarkPlacementPolicy benchmark = new BenchmarkPlacementPolicy();
-        benchmark.setup();
-        for (; ; ) {
-            benchmark.chooseTargetDefaultWithWriter();
-        }
-        */
-
     }
 }

@@ -157,7 +157,7 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
         if (selected.length < additional) {
             // more needed
             LOGGER.warn(String.format(
-                    "expect %d datanodes but allocate only:%d/[%s], looser placement policy",
+                    "expect %d datanodes but allocate only:%d/[%s], path:%s writer:%s provided:[%s] exclusion:[%s]",
                     additional,
                     selected.length,
                     Arrays.stream(selected)
@@ -166,52 +166,26 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                                     storage,
                                     storage.getDatanodeDescriptor().getNetworkLocation()
                             ))
-                            .collect(Collectors.joining(","))
-            ));
-
-            DatanodeStorageInfo[] more = chooseTarget(
+                            .collect(Collectors.joining(",")),
                     path,
-                    additional - selected.length,
-                    null,
-                    Stream.of(
-                            chosen.stream(),
-                            Arrays.stream(selected)
-                    ).flatMap(Function.identity())
-                            .collect(Collectors.toList()),
-                    false,
-                    Collections.emptySet(),
-                    block_size,
-                    storage_policy
-            );
-
-            // concat
-            selected = Stream.of(
-                    Arrays.stream(selected),
-                    Arrays.stream(more)
-            ).flatMap(Function.identity())
-                    .toArray(DatanodeStorageInfo[]::new);
-        }
-
-        DatanodeStorageInfo[] final_selected = selected;
-        if (final_selected.length < additional) {
-            LOGGER.warn(String.format(
-                    "still lack of storage for allocation:%d, got:%d/[%s]",
-                    additional,
-                    final_selected.length,
-                    Arrays.stream(final_selected)
+                    writer,
+                    chosen.stream()
                             .map((storage) -> String.format(
                                     "(%s|%s)",
                                     storage,
                                     storage.getDatanodeDescriptor().getNetworkLocation()
                             ))
+                            .collect(Collectors.joining(",")),
+                    excludes.stream()
+                            .map(NodeBase::getPath)
                             .collect(Collectors.joining(","))
             ));
         }
 
         debugOn(() -> String.format(
                 "selected:%d/[%s], require:%d, excldue:[%s], provided:[%s]  prefer storage type:[%s], block size:%d",
-                final_selected.length,
-                Arrays.stream(final_selected)
+                selected.length,
+                Arrays.stream(selected)
                         .map((storage) -> String.format(
                                 "(%s|%s)",
                                 storage,
@@ -234,7 +208,7 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                 block_size
         ));
 
-        return final_selected;
+        return selected;
     }
 
     @Override
@@ -242,8 +216,9 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
         Set<DatanodeInfo> provided = Arrays.stream(datanodes)
                 .filter(Objects::nonNull)
                 .collect(Collectors.toCollection(
-                        () -> new TreeSet<>(Comparator.comparing(DatanodeInfo::getDatanodeUuid)))
-                );
+                        () -> new TreeSet<>(Comparator.comparing(DatanodeInfo::getDatanodeUuid))
+                ));
+
         if (provided.size() < require_replica) {
             return new CrossAZBlockBlockPlacementStatus(() -> String.format(
                     "not enough storage nodes:[%s], require:%s",
