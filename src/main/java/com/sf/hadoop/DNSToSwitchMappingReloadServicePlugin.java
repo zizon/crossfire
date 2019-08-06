@@ -1,12 +1,10 @@
 package com.sf.hadoop;
 
-import com.fs.misc.Promise;
 import com.google.gson.GsonBuilder;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.security.token.block.ExportedBlockKeys;
-import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeManager;
 import org.apache.hadoop.hdfs.server.blockmanagement.UnresolvedTopologyException;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
@@ -21,9 +19,9 @@ import org.apache.hadoop.http.HttpServer2;
 import org.apache.hadoop.net.DNSToSwitchMapping;
 
 import javax.servlet.http.HttpServletRequest;
-import java.io.IOException;
 import java.lang.reflect.Field;
-import java.util.List;
+import java.util.Collections;
+import java.util.Iterator;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -60,9 +58,6 @@ public class DNSToSwitchMappingReloadServicePlugin extends ReconfigurableService
             return;
         }
 
-        // reload cache
-        mapping.reloadCachedMappings();
-
         if (service instanceof NameNode) {
             NameNode namenode = (NameNode) service();
             DatanodeManager manager = namenode.getNamesystem()
@@ -70,42 +65,47 @@ public class DNSToSwitchMappingReloadServicePlugin extends ReconfigurableService
                     .getDatanodeManager();
 
             NamespaceInfo namespace = namenode.getFSImage().getStorage().getNamespaceInfo();
+            Iterator<DatanodeRegistration> iterator = manager.getDatanodeListForReport(HdfsConstants.DatanodeReportType.LIVE).parallelStream()
+                    // reload mapping
+                    .peek((datanode) -> Stream.of(
+                            datanode.getIpAddr(),
+                            datanode.getHostName()
+                            ).parallel()
+                                    .map(Collections::singletonList)
+                                    .peek(mapping::reloadCachedMappings)
+                                    .forEach(mapping::resolve)
+                    )
+                    .map((datanode) -> new DatanodeRegistration(
+                                    datanode,
+                                    new StorageInfo(
+                                            HdfsConstants.DATANODE_LAYOUT_VERSION,
+                                            namespace.getNamespaceID(),
+                                            namespace.getClusterID(),
+                                            namespace.getCTime(),
+                                            HdfsServerConstants.NodeType.DATA_NODE
+                                    ),
+                                    new ExportedBlockKeys(),
+                                    datanode.getSoftwareVersion()
+                            )
+                    ).iterator();
+
+            // finner lock acquisition
             FSNamesystem namesystem = namenode.getNamesystem();
-
-            manager.getDatanodeListForReport(HdfsConstants.DatanodeReportType.LIVE).parallelStream()
-                    .map((datanode) -> {
-                        // maybe warmup cache
-                        mapping.resolve(
-                                Stream.of(
-                                        datanode.getIpAddr(),
-                                        datanode.getHostName()
-                                ).collect(Collectors.toList())
-                        );
-
-                        return new DatanodeRegistration(
-                                datanode,
-                                new StorageInfo(
-                                        HdfsConstants.DATANODE_LAYOUT_VERSION,
-                                        namespace.getNamespaceID(),
-                                        namespace.getClusterID(),
-                                        namespace.getCTime(),
-                                        HdfsServerConstants.NodeType.DATA_NODE
-                                ),
-                                new ExportedBlockKeys(),
-                                datanode.getSoftwareVersion()
-                        );
-                    })
-                    .forEach((registration) -> {
-                        try {
-                            namesystem.writeLock();
-                            manager.registerDatanode(registration);
-                            LOGGER.info("refresh datanode:" + registration);
-                        } catch (UnresolvedTopologyException | DisallowedDatanodeException e) {
-                            LOGGER.warn("refresh datanode fail:" + registration);
-                        } finally {
-                            namesystem.writeUnlock();
-                        }
-                    });
+            try {
+                namesystem.writeLock();
+                while (iterator.hasNext()) {
+                    DatanodeRegistration registration = iterator.next();
+                    try {
+                        manager.registerDatanode(registration);
+                    } catch (UnresolvedTopologyException | DisallowedDatanodeException e) {
+                        LOGGER.warn("refresh datanode fail:" + registration);
+                    }
+                }
+            } catch (Throwable throwable) {
+                LOGGER.warn("unexpected exception", throwable);
+            } finally {
+                namesystem.writeUnlock();
+            }
         }
     }
 
