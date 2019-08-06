@@ -1,5 +1,6 @@
 package com.sf.hadoop;
 
+import com.fs.misc.Promise;
 import com.google.gson.GsonBuilder;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -70,34 +71,41 @@ public class DNSToSwitchMappingReloadServicePlugin extends ReconfigurableService
 
             NamespaceInfo namespace = namenode.getFSImage().getStorage().getNamespaceInfo();
             FSNamesystem namesystem = namenode.getNamesystem();
-            try {
-                namesystem.writeLock();
-                manager.getDatanodeListForReport(HdfsConstants.DatanodeReportType.LIVE).stream()
-                        .forEach((datanode) -> {
-                            DatanodeRegistration registration = new DatanodeRegistration(
-                                    datanode,
-                                    new StorageInfo(
-                                            HdfsConstants.DATANODE_LAYOUT_VERSION,
-                                            namespace.getNamespaceID(),
-                                            namespace.getClusterID(),
-                                            namespace.getCTime(),
-                                            HdfsServerConstants.NodeType.DATA_NODE
-                                    ),
-                                    new ExportedBlockKeys(),
-                                    datanode.getSoftwareVersion()
-                            );
-                            try {
-                                manager.registerDatanode(registration);
-                                LOGGER.info("refresh datanode:" + registration);
-                            } catch (UnresolvedTopologyException | DisallowedDatanodeException e) {
-                                LOGGER.warn("refresh datanode fail:" + registration);
-                            }
-                        });
-            } catch (Throwable e) {
-                LOGGER.error("unexpected expcetion when reloading datanodes", e);
-            } finally {
-                namesystem.writeUnlock();
-            }
+
+            manager.getDatanodeListForReport(HdfsConstants.DatanodeReportType.LIVE).parallelStream()
+                    .map((datanode) -> {
+                        // maybe warmup cache
+                        mapping.resolve(
+                                Stream.of(
+                                        datanode.getIpAddr(),
+                                        datanode.getHostName()
+                                ).collect(Collectors.toList())
+                        );
+
+                        return new DatanodeRegistration(
+                                datanode,
+                                new StorageInfo(
+                                        HdfsConstants.DATANODE_LAYOUT_VERSION,
+                                        namespace.getNamespaceID(),
+                                        namespace.getClusterID(),
+                                        namespace.getCTime(),
+                                        HdfsServerConstants.NodeType.DATA_NODE
+                                ),
+                                new ExportedBlockKeys(),
+                                datanode.getSoftwareVersion()
+                        );
+                    })
+                    .forEach((registration) -> {
+                        try {
+                            namesystem.writeLock();
+                            manager.registerDatanode(registration);
+                            LOGGER.info("refresh datanode:" + registration);
+                        } catch (UnresolvedTopologyException | DisallowedDatanodeException e) {
+                            LOGGER.warn("refresh datanode fail:" + registration);
+                        } finally {
+                            namesystem.writeUnlock();
+                        }
+                    });
         }
     }
 
