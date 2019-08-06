@@ -154,10 +154,49 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                 return_chosen
         );
 
+        if (selected.length < additional) {
+            // more needed
+            LOGGER.warn(String.format(
+                    "expect %d datanodes but allocate only:%d/[%s], looser placement policy",
+                    additional,
+                    selected.length,
+                    Arrays.stream(selected)
+                            .map((storage) -> String.format(
+                                    "(%s|%s)",
+                                    storage,
+                                    storage.getDatanodeDescriptor().getNetworkLocation()
+                            ))
+                            .collect(Collectors.joining(","))
+            ));
+
+            DatanodeStorageInfo[] more = chooseTarget(
+                    path,
+                    additional - selected.length,
+                    null,
+                    Stream.of(
+                            chosen.stream(),
+                            Arrays.stream(selected)
+                    ).flatMap(Function.identity())
+                            .collect(Collectors.toList()),
+                    false,
+                    Collections.emptySet(),
+                    block_size,
+                    storage_policy
+            );
+
+            // concat
+            selected = Stream.of(
+                    Arrays.stream(selected),
+                    Arrays.stream(more)
+            ).flatMap(Function.identity())
+                    .toArray(DatanodeStorageInfo[]::new);
+        }
+
+        DatanodeStorageInfo[] final_selected = selected;
         debugOn(() -> String.format(
                 "selected:%d/[%s], require:%d, excldue:[%s], provided:[%s]  prefer storage type:[%s], block size:%d",
-                selected.length,
-                Arrays.stream(selected)
+                final_selected.length,
+                Arrays.stream(final_selected)
                         .map((storage) -> String.format(
                                 "(%s|%s)",
                                 storage,
@@ -180,7 +219,22 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                 block_size
         ));
 
-        return selected;
+        if (final_selected.length < additional) {
+            LOGGER.warn(String.format(
+                    "still lack of storage for allocation:%d, got:%d/[%s]",
+                    additional,
+                    final_selected.length,
+                    Arrays.stream(final_selected)
+                            .map((storage) -> String.format(
+                                    "(%s|%s)",
+                                    storage,
+                                    storage.getDatanodeDescriptor().getNetworkLocation()
+                            ))
+                            .collect(Collectors.joining(","))
+            ));
+        }
+
+        return final_selected;
     }
 
     @Override
