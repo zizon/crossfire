@@ -221,7 +221,7 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
             return verifyBlockPlacementFast(datanodes, require_replica);
         }
 
-        return verifyBlockPlacementBalanced(datanodes, require_replica);
+        return verifyBlockPlacementBalancedOptimal(datanodes, require_replica);
     }
 
     @Override
@@ -303,17 +303,48 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
         ));
     }
 
-    protected BlockPlacementStatus verifyBlockPlacementBalanced(DatanodeInfo[] datanodes, int require_replica) {
-        Set<DatanodeInfo> provided = Arrays.stream(datanodes)
+    protected BlockPlacementStatus verifyBlockPlacementBalancedOptimal(DatanodeInfo[] datanodes, int require_replica) {
+        Map<String, LongSummaryStatistics> hierarchy = Arrays.stream(datanodes)
                 .filter(Objects::nonNull)
-                .collect(Collectors.toCollection(
-                        () -> new TreeSet<>(Comparator.comparing(DatanodeInfo::getDatanodeUuid))
-                ));
+                .flatMap((datanode) -> {
+                    // build parent child pair
+                    Stream.Builder<Map.Entry<String, String>> parent_child = Stream.builder();
+                    for (Node current = datanode; current.getParent() != null; current = current.getParent()) {
+                        parent_child.accept(new AbstractMap.SimpleImmutableEntry<>(
+                                NodeBase.getPath(current.getParent()),
+                                NodeBase.getPath(current)
+                        ));
+                    }
 
-        if (provided.size() < require_replica) {
+                    return parent_child.build();
+                })
+                .collect(
+                        Collectors.groupingBy(
+                                // greoup by parent
+                                Map.Entry::getKey,
+                                Collectors.collectingAndThen(
+                                        // group by children statistics
+                                        // then merge into one
+                                        Collectors.groupingBy(
+                                                Map.Entry::getValue,
+                                                Collectors.summarizingInt((value) -> 1)
+                                        ),
+                                        (children) -> children.values().stream()
+                                                .collect(Collectors.summarizingLong(IntSummaryStatistics::getSum))
+                                )
+                        )
+                );
+
+        boolean replica_num_ok = Optional.ofNullable(
+                hierarchy.get(
+                        NodeBase.getPath(topology.getNode(NodeBase.ROOT)))
+        ).map((root) -> root.getSum() >= require_replica)
+                .orElse(false);
+        if (!replica_num_ok) {
             return new CrossAZBlockBlockPlacementStatus(() -> String.format(
                     "not enough storage nodes:[%s], require:%s",
-                    provided.stream()
+                    Arrays.stream(datanodes)
+                            .filter(Objects::nonNull)
                             .map((node) -> String.format(
                                     "(%s)",
                                     node
@@ -323,101 +354,83 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
             ));
         }
 
-        NetworkTopology constructed = new NetworkTopology();
-        provided.forEach(constructed::add);
+        boolean not_optimal = hierarchy.entrySet().stream()
+                // find any not optimal
+                .anyMatch((entry) -> {
+                    String parent = entry.getKey();
 
-        // fast path: replica optimal?
-        if (require_replica < topology.getNumOfRacks()) {
-            // each rack should had one
-            if (constructed.getNumOfRacks() < require_replica) {
-                return new CrossAZBlockBlockPlacementStatus(() -> String.format(
-                        "placement is not optimal, rebuild replica:%d , distinct rack:%d, but place in:%d",
-                        require_replica,
-                        topology.getNumOfRacks(),
-                        constructed.getNumOfRacks()
-                ));
-            }
-        }
+                    // calcualte totoal placement of this parent
+                    LongSummaryStatistics children_statistics = entry.getValue();
 
-        // fast path: datanode optimal?
-        if (provided.size() < topology.getNumOfRacks()) {
-            // datanode should be place in distinct rack
-            if (constructed.getNumOfRacks() != provided.size()) {
-                return new CrossAZBlockBlockPlacementStatus(() -> String.format(
-                        "datanodes:%d can be place in:%d but place:%d",
-                        provided.size(),
-                        topology.getNumOfRacks(),
-                        constructed.getNumOfRacks()
-                ));
-            }
-        }
+                    long leaf = children_statistics.getSum();
+                    long placed_group = children_statistics.getCount();
+                    long max_placed = children_statistics.getMax();
+                    long min_placed = children_statistics.getMin();
 
-        // slow path: load balanced test
-        Set<String> visited = new HashSet<>();
-        for (DatanodeInfo datanode : provided) {
-            for (Node tracking = datanode; tracking != null; tracking = tracking.getParent()) {
-                String location = tracking.getNetworkLocation();
-                if (!visited.add(location)) {
-                    continue;
-                }
+                    // 1. find topology child of parent parent
+                    long available = topology.getDatanodesInRack(parent).size();
 
-                List<Node> placed_group = constructed.getDatanodesInRack(location);
-                List<Node> available_group = topology.getDatanodesInRack(location);
-                int placed = constructed.countNumOfAvailableNodes(location, Collections.emptyList());
+                    // 2. can be place in different group?
+                    if (leaf <= available) {
+                        if (placed_group != leaf) {
+                            debugOn(() -> String.format(
+                                    "rack:%s not optimal,leaf:%d can be place in distinct group:%d , but place in:%d",
+                                    parent,
+                                    leaf,
+                                    available,
+                                    placed_group
+                            ));
 
-                if (placed < placed_group.size()) {
-                    LOGGER.warn(String.format(
-                            "expect placed:%d >= placed_group:%d but not",
-                            placed,
-                            placed_group.size()
+                            // not optimal
+                            return true;
+                        }
+                    } else if (placed_group != available) {
+                        // not enough distinct group
+                        debugOn(() -> String.format(
+                                "rack:%s not optimal,leaf:%s shoud be place in all available greoup:%d, but place:%d",
+                                parent,
+                                leaf,
+                                available,
+                                placed_group
+                        ));
+
+                        // not optimal
+                        return true;
+                    }
+
+                    // if balanced?
+                    boolean not_balanced = max_placed - min_placed > 1;
+
+                    debugOn(() -> String.format(
+                            "rack:%s balanced:%b place in group:%d, max:%d min:%d average:%f available:%d leaf:%d",
+                            parent,
+                            !not_balanced,
+                            placed_group,
+                            max_placed,
+                            min_placed,
+                            children_statistics.getAverage(),
+                            available,
+                            leaf
                     ));
-                    continue;
-                }
 
-                // expect more groups, available?
-                if (placed_group.size() < available_group.size()
-                        && placed > placed_group.size()) {
-                    // more group available,not optimal
-                    return new CrossAZBlockBlockPlacementStatus(() -> String.format(
-                            "location:%s to place:%d in available:%d but placed:%d",
-                            location,
-                            placed,
-                            available_group.size(),
-                            placed_group.size()
-                    ));
-                }
+                    // note: balance is optimal
+                    return not_balanced;
+                });
 
-                // placed use all available group
-                // each group load equal?
-                int min_load = 0;
-                int max_load = 0;
-                for (Node group : placed_group) {
-                    int leaves = constructed.countNumOfAvailableNodes(NodeBase.getPath(group), Collections.emptyList());
-                    min_load = Math.min(min_load == 0 ? leaves : min_load, leaves);
-                    max_load = Math.max(leaves, max_load);
-                }
+        if (not_optimal) {
+            Promise.PromiseSupplier<String> reason = () -> String.format(
+                    "placement not optimal, datanodes:[%s], require replica:%d",
+                    Arrays.stream(datanodes)
+                            .map((node) -> String.format(
+                                    "(%s)",
+                                    node
+                            ))
+                            .collect(Collectors.joining(",")),
+                    require_replica
+            );
+            debugOn(reason);
 
-                if (max_load - min_load > 1) {
-                    int final_max_load = max_load;
-                    int final_min_load = min_load;
-                    return new CrossAZBlockBlockPlacementStatus(() -> String.format(
-                            "location:%s load not balanced, min:%d max:%d of group:[%s]",
-                            location,
-                            final_min_load,
-                            final_max_load,
-                            placed_group.stream()
-                                    .map((node) -> String.format(
-                                            "(%s:[%s])",
-                                            node,
-                                            constructed.getLeaves(NodeBase.getPath(node)).stream()
-                                                    .map((leaf) -> String.format(
-                                                            "%s",
-                                                            leaf
-                                                    )).collect(Collectors.joining(":,"))
-                                    )).collect(Collectors.joining(","))
-                    ));
-                }
-            }
+            return new CrossAZBlockBlockPlacementStatus(reason);
         }
 
         return PLACEMENT_OK;

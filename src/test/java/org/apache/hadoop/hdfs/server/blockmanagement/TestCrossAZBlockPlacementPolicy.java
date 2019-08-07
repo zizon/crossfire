@@ -85,8 +85,8 @@ public class TestCrossAZBlockPlacementPolicy {
         policy = new CrossAZBlockPlacementPolicy();
         topology = new NetworkTopology();
         datanodes.forEach(topology::add);
-        Configuration configuration  = new Configuration();
-        configuration.setBoolean(CrossAZBlockPlacementPolicy.USER_FAST_VERIFY,false);
+        Configuration configuration = new Configuration();
+        configuration.setBoolean(CrossAZBlockPlacementPolicy.USER_FAST_VERIFY, false);
         policy.initialize(configuration, null, topology, null);
     }
 
@@ -609,14 +609,18 @@ public class TestCrossAZBlockPlacementPolicy {
 
     @Test
     public void test() {
-        Node node = topology.getLeaves(NodeBase.ROOT).get(0);
-        LOGGER.info(Math.floorDiv(11, 5));
-        LOGGER.debug(NodeBase.getPath(node));
-        Arrays.stream(
-                NodeBase.getPath(node)
-                        .split(NodeBase.PATH_SEPARATOR_STR)
-        ).forEach(LOGGER::debug);
-
-        LOGGER.debug(NodeBase.getPath(node).substring(0, NodeBase.getPath(node).indexOf("/", 1)));
+        DatanodeInfo[] even_rack_2 = selectSubset("even", "rack_2");
+        DatanodeInfo[] even_rack_4 = selectSubset("even", "rack_4");
+        DatanodeInfo[] odd_rack_1 = selectSubset("odd", "rack_1");
+        DatanodeInfo[] odd_rack_3 = selectSubset("odd", "rack_3");
+        DatanodeInfo[] odd_rack_5 = selectSubset("odd", "rack_5");
+        policy.verifyBlockPlacementBalancedOptimal(
+                Stream.of(
+                        even_rack_2[0],
+                        even_rack_4[0],
+                        odd_rack_1[0]
+                ).toArray(DatanodeInfo[]::new),
+                3
+        );
     }
 }
