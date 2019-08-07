@@ -63,7 +63,7 @@ public class CrossAZBlockPlacementPolicyPlugin extends DNSToSwitchMappingReloadS
     protected NameNode namenode;
     protected Configuration configuration;
     protected BlockPlacementPolicy default_policy;
-    protected BlockPlacementPolicy crossaz_policy;
+    protected CrossAZBlockPlacementPolicy crossaz_policy;
     protected MethodHandle policy_settter;
 
     @Override
@@ -170,12 +170,21 @@ public class CrossAZBlockPlacementPolicyPlugin extends DNSToSwitchMappingReloadS
 
         boolean fallback = Optional.ofNullable(request.getParameter("fallback"))
                 .map(Boolean::parseBoolean)
-                .orElse(false);
+                .orElseGet(() -> namenode.getNamesystem()
+                        .getBlockManager()
+                        .getBlockPlacementPolicy()
+                        != crossaz_policy
+                );
         if (fallback) {
             disableCrossAZBlockPlacementPolicy();
         } else {
             enableCrossAZBlockPlacementPolicy();
         }
+
+        boolean fast_verify = Optional.ofNullable(request.getParameter("fast-verify"))
+                .map(Boolean::parseBoolean)
+                .orElseGet(crossaz_policy::isFastVerifyEnable);
+        crossaz_policy.setFastVerify(fast_verify);
     }
 
     @Override
@@ -215,6 +224,9 @@ public class CrossAZBlockPlacementPolicyPlugin extends DNSToSwitchMappingReloadS
                 .getBlockManager()
                 .getBlockPlacementPolicy() == default_policy
         );
+
+        // current fast verify state
+        content.put("fast-verify", crossaz_policy.isFastVerifyEnable());
 
         return new GsonBuilder()
                 .setPrettyPrinting()

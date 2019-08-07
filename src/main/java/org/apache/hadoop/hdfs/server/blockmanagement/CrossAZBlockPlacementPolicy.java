@@ -66,6 +66,15 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
     protected Host2NodesMap mapping;
     protected boolean use_fast_verify;
 
+    public void setFastVerify(boolean enable) {
+        this.use_fast_verify = enable;
+        this.configuration.setBoolean(USER_FAST_VERIFY, enable);
+    }
+
+    public boolean isFastVerifyEnable() {
+        return this.use_fast_verify;
+    }
+
     @Override
     public DatanodeStorageInfo[] chooseTarget(
             String path,

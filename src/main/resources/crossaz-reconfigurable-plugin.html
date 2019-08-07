@@ -36,6 +36,7 @@
                         ;
                 });
 
+                // attach switch
                 document.querySelector("#switch").addEventListener('click',(event) => {
                         event.target.disabled = true;
                         let path="__RECONFIG_PATH__";
@@ -45,14 +46,29 @@
                             .finally(()=>event.target.disabled=false)
                 });
 
+                // attach flip
+                document.querySelector("#flip-fast-verify").addEventListener('click',(event) => {
+                        event.target.disabled = true;
+                        let path="__RECONFIG_PATH__";
+                        fetch(path+"?reload=true&format=json&fast-verify="+!event.target.verify)
+                            .then((response)=>response.json())
+                            .then(render)
+                            .finally(()=>event.target.disabled=false)
+                        ;
+                });
+
                 let response = __JSON_TEMPLATE__;
                 
                 // fallback
                 function render(response) {
                     document.querySelector("#policy")
-                            .innerHTML='Current Poiciy:' + response['policy'];                        
-                    
+                            .innerHTML='Current Poiciy:' + response['policy'];
+
                     document.querySelector('#switch').fallback= response['fallback'];
+
+                    document.querySelector("#fast-verify")
+                            .innerHTML='Placement Fast Verify Enabled:' + response['fast-verify'];
+                    document.querySelector('#flip-fast-verify').verify = response['fast-verify'];
                 
                     let datanodes = response['datanodes'];
                     if(datanodes.lenth <= 0){
@@ -106,6 +122,10 @@
         <div class='button'>
             <span id='policy'></span>
             <button id='switch'>Click To Switch</button>
+        </div>
+        <div class='button'>
+            <span id='fast-verify'></span>
+            <button id='flip-fast-verify'>Flip</button>
         </div>
     </div>
     <table id='datanodes' border='1'>
