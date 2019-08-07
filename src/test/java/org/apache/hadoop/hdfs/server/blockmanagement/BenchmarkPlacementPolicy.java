@@ -93,9 +93,12 @@ public class BenchmarkPlacementPolicy {
         default_policy = new BlockPlacementPolicyDefault();
         topology = new NetworkTopology();
         datanodes.forEach(topology::add);
-        policy.initialize(null, null, topology, null);
 
-        default_policy.initialize(new Configuration(), new FSClusterStats() {
+        Configuration configuration = new Configuration();
+        configuration.setBoolean(CrossAZBlockPlacementPolicy.USER_FAST_VERIFY, true);
+        policy.initialize(configuration, null, topology, null);
+
+        default_policy.initialize(configuration, new FSClusterStats() {
 
             @Override
             public int getTotalLoad() {
@@ -151,7 +154,7 @@ public class BenchmarkPlacementPolicy {
                 .collect(Collectors.toCollection(() -> new TreeSet<>(Comparator.comparing(DatanodeStorageInfo::getStorageID))));
     }
 
-    //@Benchmark
+    @Benchmark
     public void chooseTarget() {
         DatanodeStorageInfo[] selected = policy.chooseTarget(null,
                 3,
@@ -164,7 +167,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    //@Benchmark
+    @Benchmark
     public void chooseTargetDefault() {
         default_policy.chooseTarget(null,
                 3,
@@ -176,7 +179,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    //@Benchmark
+    @Benchmark
     public void chooseTargetWithWriter() {
         policy.chooseTarget(null,
                 3,
@@ -189,7 +192,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    //@Benchmark
+    @Benchmark
     public void chooseTargetDefaultWithWriter() {
         default_policy.chooseTarget(null,
                 3,
@@ -215,7 +218,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    //@Benchmark
+    @Benchmark
     public void verifyExceed() {
         //             root      --level 0
         //             /   \
@@ -229,7 +232,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    //@Benchmark
+    @Benchmark
     public void verfiyDangle() {
         //             root      --level 0
         //             /   \
@@ -258,7 +261,7 @@ public class BenchmarkPlacementPolicy {
 
     }
 
-    //@Benchmark
+    @Benchmark
     public void verifyExceedDefault() {
         //             root      --level 0
         //             /   \
@@ -272,7 +275,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    //@Benchmark
+    @Benchmark
     public void verfiyDangleDefault() {
         //             root      --level 0
         //             /   \

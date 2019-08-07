@@ -2,6 +2,7 @@ package org.apache.hadoop.hdfs.server.blockmanagement;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.protocol.BlockStoragePolicy;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
@@ -84,7 +85,9 @@ public class TestCrossAZBlockPlacementPolicy {
         policy = new CrossAZBlockPlacementPolicy();
         topology = new NetworkTopology();
         datanodes.forEach(topology::add);
-        policy.initialize(null, null, topology, null);
+        Configuration configuration  = new Configuration();
+        configuration.setBoolean(CrossAZBlockPlacementPolicy.USER_FAST_VERIFY,false);
+        policy.initialize(configuration, null, topology, null);
     }
 
     protected DatanodeInfo[] selectSubset(String datacenter, String rack) {
@@ -229,6 +232,7 @@ public class TestCrossAZBlockPlacementPolicy {
     }
 
     protected void helpTestchooseReplicasToDelete(int replica, int failed_nodes, NavigableSet<DatanodeStorageInfo> storages, String messsage, boolean satisfied_after_remove) {
+        replica = replica % 2 == 0 ? replica : replica + 1;
         LOGGER.debug("-------------------------");
         List<DatanodeStorageInfo> selected = policy.chooseReplicasToDelete(storages, replica, Collections.emptyList(), null, null);
         int allow_to_remove = storages.size() - failed_nodes;
@@ -317,7 +321,7 @@ public class TestCrossAZBlockPlacementPolicy {
         //         /\  \    / \  \    \
         //       2  12 22  4  14  24   1  --level 3
         storages = buildSet(DatanodeStorage.State.NORMAL, type, even_rack_2[0], even_rack_2[1], even_rack_2[2], even_rack_4[0], even_rack_4[1], even_rack_4[2], odd_rack_1[0]);
-        helpTestchooseReplicasToDelete(3, 0, storages, "satisfied with exceeded node case 2", true);
+        helpTestchooseReplicasToDelete(3, 0, storages, "satisfied with exceeded node case 2", false);
 
         //                   root             --level 0
         //                /      \
@@ -327,7 +331,7 @@ public class TestCrossAZBlockPlacementPolicy {
         //         /       / \  \    \
         //       2       4  14  24   1  --level 3
         storages = buildSet(DatanodeStorage.State.NORMAL, type, even_rack_2[0], even_rack_4[0], even_rack_4[1], even_rack_4[2], odd_rack_1[0]);
-        helpTestchooseReplicasToDelete(3, 0, storages, "satisfied with exceeded node case 2", true);
+        helpTestchooseReplicasToDelete(3, 0, storages, "satisfied with exceeded node case 2", false);
 
         //                   root             --level 0
         //                /      \
@@ -357,7 +361,7 @@ public class TestCrossAZBlockPlacementPolicy {
         //         /       |       |
         //       2        4       1  --level 3
         storages = buildSet(DatanodeStorage.State.NORMAL, type, even_rack_2[0], even_rack_4[0], odd_rack_1[0]);
-        helpTestchooseReplicasToDelete(3, 0, storages, "satisfied with exceeded node case 3", true);
+        helpTestchooseReplicasToDelete(3, 0, storages, "satisfied with exceeded node case 3", false);
     }
 
     protected void helpTestChooseTargetForNewBlock(int replica, Node writer,

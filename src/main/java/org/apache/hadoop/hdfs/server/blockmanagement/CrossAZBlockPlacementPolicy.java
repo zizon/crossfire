@@ -25,6 +25,8 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
 
     public static final Log LOGGER = LogFactory.getLog(CrossAZBlockPlacementPolicy.class);
 
+    public static String USER_FAST_VERIFY = "com.sf.crossaz.fast-verify";
+
     protected static class CrossAZBlockBlockPlacementStatus implements BlockPlacementStatus {
 
         protected final boolean ok;
@@ -62,6 +64,7 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
     protected FSClusterStats stats;
     protected NetworkTopology topology;
     protected Host2NodesMap mapping;
+    protected boolean use_fast_verify;
 
     @Override
     public DatanodeStorageInfo[] chooseTarget(
@@ -214,6 +217,93 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
 
     @Override
     public BlockPlacementStatus verifyBlockPlacement(DatanodeInfo[] datanodes, int require_replica) {
+        if (use_fast_verify) {
+            return verifyBlockPlacementFast(datanodes, require_replica);
+        }
+
+        return verifyBlockPlacementBalanced(datanodes, require_replica);
+    }
+
+    @Override
+    public List<DatanodeStorageInfo> chooseReplicasToDelete(
+            Collection<DatanodeStorageInfo> candidates,
+            int config_replica,
+            List<StorageType> excess_types,
+            DatanodeDescriptor adde_hint,
+            DatanodeDescriptor delete_hint) {
+        // a perfect placement should be balanced, even replica
+        int expected_replica = config_replica % 2 != 0 ? config_replica + 1 : config_replica;
+
+        if (candidates.size() <= expected_replica) {
+            return Collections.emptyList();
+        }
+
+        NetworkTopology constructed = new NetworkTopology();
+        Comparator<DatanodeStorageInfo> comparator = selectForDeletion(constructed);
+
+        // group storage by datanode,
+        // it may not necessary but for defensive
+        Map<String, NavigableSet<DatanodeStorageInfo>> cluster_by_datanode = candidates.stream()
+                .filter(Objects::nonNull)
+                .peek((storage) -> constructed.add(storage.getDatanodeDescriptor()))
+                .collect(Collectors.groupingBy(
+                        (storage) -> storage.getDatanodeDescriptor().getDatanodeUuid(),
+                        Collectors.toCollection(() -> new TreeSet<>(Comparator.comparing(DatanodeStorageInfo::getStorageID)))
+                ));
+
+        // select removal
+        List<DatanodeStorageInfo> to_remove = IntStream.range(0, candidates.size() - expected_replica)
+                .mapToObj((ignore) -> cluster_by_datanode.values().stream()
+                        .flatMap(Collection::stream)
+                        .min(comparator)
+                        .map((storage) -> {
+                            // update topology due to storage removal
+                            // since it matters ordering
+                            cluster_by_datanode.computeIfPresent(
+                                    storage.getDatanodeDescriptor().getDatanodeUuid(),
+                                    (key, storage_under_node) -> {
+                                        // evict from set
+                                        storage_under_node.remove(storage);
+
+                                        // remove completely if empty
+                                        if (storage_under_node.isEmpty()) {
+                                            constructed.remove(storage.getDatanodeDescriptor());
+                                            return null;
+                                        }
+
+                                        return storage_under_node;
+                                    }
+                            );
+
+                            return storage;
+                        })
+                )
+                .filter(Optional::isPresent)
+                .map(Optional::get)
+                .collect(Collectors.toList());
+
+        if (cluster_by_datanode.values().stream()
+                .flatMap(Collection::stream)
+                .anyMatch((storage) -> storage.getState() != DatanodeStorage.State.FAILED)) {
+            return to_remove;
+        }
+
+        return Collections.emptyList();
+    }
+
+    protected BlockPlacementStatus verifyBlockPlacementFast(DatanodeInfo[] datanodes, int require_replica) {
+        if (datanodes.length >= require_replica) {
+            return PLACEMENT_OK;
+        }
+
+        return new CrossAZBlockBlockPlacementStatus(() -> String.format(
+                "expect replica:%s, but got:%s",
+                require_replica,
+                datanodes.length
+        ));
+    }
+
+    protected BlockPlacementStatus verifyBlockPlacementBalanced(DatanodeInfo[] datanodes, int require_replica) {
         Set<DatanodeInfo> provided = Arrays.stream(datanodes)
                 .filter(Objects::nonNull)
                 .collect(Collectors.toCollection(
@@ -241,7 +331,7 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
             // each rack should had one
             if (constructed.getNumOfRacks() < require_replica) {
                 return new CrossAZBlockBlockPlacementStatus(() -> String.format(
-                        "placement is not optimal, reburied replica:%d , distinct rack:%d, but place in:%d",
+                        "placement is not optimal, rebuild replica:%d , distinct rack:%d, but place in:%d",
                         require_replica,
                         topology.getNumOfRacks(),
                         constructed.getNumOfRacks()
@@ -331,70 +421,6 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
         }
 
         return PLACEMENT_OK;
-    }
-
-    @Override
-    public List<DatanodeStorageInfo> chooseReplicasToDelete(
-            Collection<DatanodeStorageInfo> candidates,
-            int expected_replica,
-            List<StorageType> excess_types,
-            DatanodeDescriptor adde_hint,
-            DatanodeDescriptor delete_hint) {
-        if (candidates.size() <= expected_replica) {
-            return Collections.emptyList();
-        }
-
-        NetworkTopology constructed = new NetworkTopology();
-        Comparator<DatanodeStorageInfo> comparator = selectForDeletion(constructed);
-
-        // group storage by datanode,
-        // it may not necessary but for defensive
-        Map<String, NavigableSet<DatanodeStorageInfo>> cluster_by_datanode = candidates.stream()
-                .filter(Objects::nonNull)
-                .peek((storage) -> constructed.add(storage.getDatanodeDescriptor()))
-                .collect(Collectors.groupingBy(
-                        (storage) -> storage.getDatanodeDescriptor().getDatanodeUuid(),
-                        Collectors.toCollection(() -> new TreeSet<>(Comparator.comparing(DatanodeStorageInfo::getStorageID)))
-                ));
-
-        // select removal
-        List<DatanodeStorageInfo> to_remove = IntStream.range(0, candidates.size() - expected_replica)
-                .mapToObj((ignore) -> cluster_by_datanode.values().stream()
-                        .flatMap(Collection::stream)
-                        .min(comparator)
-                        .map((storage) -> {
-                            // update topology due to storage removal
-                            // since it matters ordering
-                            cluster_by_datanode.computeIfPresent(
-                                    storage.getDatanodeDescriptor().getDatanodeUuid(),
-                                    (key, storage_under_node) -> {
-                                        // evict from set
-                                        storage_under_node.remove(storage);
-
-                                        // remove completely if empty
-                                        if (storage_under_node.isEmpty()) {
-                                            constructed.remove(storage.getDatanodeDescriptor());
-                                            return null;
-                                        }
-
-                                        return storage_under_node;
-                                    }
-                            );
-
-                            return storage;
-                        })
-                )
-                .filter(Optional::isPresent)
-                .map(Optional::get)
-                .collect(Collectors.toList());
-
-        if (cluster_by_datanode.values().stream()
-                .flatMap(Collection::stream)
-                .anyMatch((storage) -> storage.getState() != DatanodeStorage.State.FAILED)) {
-            return to_remove;
-        }
-
-        return Collections.emptyList();
     }
 
     protected Comparator<DatanodeStorageInfo> selectForDeletion(NetworkTopology constructed) {
@@ -635,5 +661,8 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
         this.stats = stats;
         this.topology = topology;
         this.mapping = mapping;
+        this.use_fast_verify = Optional.ofNullable(this.configuration.get(USER_FAST_VERIFY))
+                .map(Boolean::parseBoolean)
+                .orElse(true);
     }
 }
