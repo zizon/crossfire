@@ -4,6 +4,7 @@ import com.google.gson.GsonBuilder;
 import com.sf.hadoop.DNSToSwitchMappingReloadServicePlugin;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
@@ -26,6 +27,8 @@ import java.util.stream.Collectors;
 public class CrossAZBlockPlacementPolicyPlugin extends DNSToSwitchMappingReloadServicePlugin {
 
     public static final Log LOGGER = LogFactory.getLog(CrossAZBlockPlacementPolicyPlugin.class);
+
+    public static String RESOLVE_SCRIPT = "com.sf.resolve-script";
 
     public static class LogServlet extends LogLevel.Servlet {
 
@@ -80,6 +83,16 @@ public class CrossAZBlockPlacementPolicyPlugin extends DNSToSwitchMappingReloadS
 
         this.namenode = (NameNode) service;
         this.configuration = stealNamenodeConfiguration();
+
+        if (this.mapping instanceof Configurable) {
+            Optional.ofNullable(this.configuration.get(RESOLVE_SCRIPT))
+                    .ifPresent((script) -> configuration.set(
+                            CommonConfigurationKeys.NET_TOPOLOGY_SCRIPT_FILE_NAME_KEY,
+                            script)
+                    );
+
+            ((Configurable) this.mapping).setConf(configuration);
+        }
 
         // special hack for log level config,
         // to bypass security check
