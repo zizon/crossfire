@@ -242,6 +242,7 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
             DatanodeDescriptor delete_hint) {
         // a perfect placement should be balanced, even replica
         int expected_replica = config_replica % 2 != 0 ? config_replica + 1 : config_replica;
+        expected_replica = Math.min(4,expected_replica);
 
         if (candidates.size() <= expected_replica) {
             return Collections.emptyList();
