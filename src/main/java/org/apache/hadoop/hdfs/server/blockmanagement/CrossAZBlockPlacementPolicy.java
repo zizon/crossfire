@@ -240,9 +240,12 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
             List<StorageType> excess_types,
             DatanodeDescriptor adde_hint,
             DatanodeDescriptor delete_hint) {
-        // a perfect placement should be balanced, even replica
-        int expected_replica = config_replica % 2 != 0 ? config_replica + 1 : config_replica;
-        expected_replica = Math.min(4,expected_replica);
+        int expected_replica = config_replica;
+        if (topology.getDatanodesInRack(NodeBase.ROOT).size() == 2 && config_replica > 1) {
+            // special case for 2 datacenter, with require replication
+            // keep 2 of each at least
+            expected_replica = Math.min(4, config_replica);
+        }
 
         if (candidates.size() <= expected_replica) {
             return Collections.emptyList();
