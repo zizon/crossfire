@@ -50,7 +50,7 @@ public class BenchmarkPlacementPolicy {
                     String hostname = "datanode_" + i;
                     DatanodeID id = new DatanodeID(ip, hostname, UUID.randomUUID().toString(), 0, 0, 0, 0);
                     DatanodeDescriptor datanode = new DatanodeDescriptor(id, location);
-
+                    datanode.isAlive = true;
                     datanode.updateHeartbeat(
                             Arrays.stream(DatanodeStorage.State.values())
                                     .flatMap((state) ->
@@ -154,7 +154,7 @@ public class BenchmarkPlacementPolicy {
                 .collect(Collectors.toCollection(() -> new TreeSet<>(Comparator.comparing(DatanodeStorageInfo::getStorageID))));
     }
 
-    //@Benchmark
+    @Benchmark
     public void chooseTarget() {
         DatanodeStorageInfo[] selected = policy.chooseTarget(null,
                 3,
@@ -167,7 +167,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    //@Benchmark
+    @Benchmark
     public void chooseTargetDefault() {
         default_policy.chooseTarget(null,
                 3,
@@ -179,7 +179,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    //@Benchmark
+    @Benchmark
     public void chooseTargetWithWriter() {
         policy.chooseTarget(null,
                 3,
@@ -192,7 +192,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    //@Benchmark
+    @Benchmark
     public void chooseTargetDefaultWithWriter() {
         default_policy.chooseTarget(null,
                 3,
@@ -218,7 +218,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    //@Benchmark
+    @Benchmark
     public void verifyExceed() {
         //             root      --level 0
         //             /   \
@@ -232,7 +232,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    //@Benchmark
+    @Benchmark
     public void verfiyDangle() {
         //             root      --level 0
         //             /   \
@@ -261,7 +261,7 @@ public class BenchmarkPlacementPolicy {
 
     }
 
-    //@Benchmark
+    @Benchmark
     public void verifyExceedDefault() {
         //             root      --level 0
         //             /   \
@@ -275,7 +275,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    //@Benchmark
+    @Benchmark
     public void verfiyDangleDefault() {
         //             root      --level 0
         //             /   \
@@ -289,7 +289,7 @@ public class BenchmarkPlacementPolicy {
         );
     }
 
-    //@Benchmark
+    @Benchmark
     public void chooseReplicasToDelete() {
         //                   root             --level 0
         //                /      \
@@ -302,7 +302,7 @@ public class BenchmarkPlacementPolicy {
         policy.chooseReplicasToDelete(storages, 3, Collections.emptyList(), null, null);
     }
 
-    //@Benchmark
+    @Benchmark
     public void chooseReplicasToDeleteDefault() {
         //                   root             --level 0
         //                /      \
@@ -316,7 +316,6 @@ public class BenchmarkPlacementPolicy {
     }
 
     public static void main(String[] args) throws RunnerException {
-
         Options opt = new OptionsBuilder()
                 .include(BenchmarkPlacementPolicy.class.getSimpleName())
                 .warmupIterations(0)
@@ -324,15 +323,5 @@ public class BenchmarkPlacementPolicy {
                 .forks(1)
                 .build();
         new Runner(opt).run();
-
-        /*
-        BenchmarkPlacementPolicy bechmark = new BenchmarkPlacementPolicy();
-        bechmark.setup();
-
-        for(;;){
-            bechmark.verfiyNormal();
-        }
-
-         */
     }
 }
