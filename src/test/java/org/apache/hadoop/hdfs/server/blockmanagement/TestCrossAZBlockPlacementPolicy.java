@@ -44,6 +44,7 @@ public class TestCrossAZBlockPlacementPolicy {
                     String hostname = "datanode_" + i;
                     DatanodeID id = new DatanodeID(ip, hostname, UUID.randomUUID().toString(), 0, 0, 0, 0);
                     DatanodeDescriptor datanode = new DatanodeDescriptor(id, location);
+                    datanode.isAlive = true;
 
                     datanode.updateHeartbeat(
                             Arrays.stream(DatanodeStorage.State.values())
@@ -445,8 +446,10 @@ public class TestCrossAZBlockPlacementPolicy {
                 Stream.concat(
                         Arrays.stream(selected)
                                 .map(DatanodeStorageInfo::getDatanodeDescriptor),
-                        Arrays.stream(chosen)
-                                .map(DatanodeStorageInfo::getDatanodeDescriptor)
+                        include_chosen ?
+                                Stream.empty() :
+                                Arrays.stream(chosen)
+                                        .map(DatanodeStorageInfo::getDatanodeDescriptor)
                 ).toArray(DatanodeInfo[]::new),
                 replica
         );

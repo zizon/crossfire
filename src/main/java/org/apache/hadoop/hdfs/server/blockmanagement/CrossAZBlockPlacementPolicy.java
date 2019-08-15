@@ -5,6 +5,7 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.StorageType;
+import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.protocol.BlockStoragePolicy;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
@@ -14,6 +15,7 @@ import org.apache.hadoop.net.NodeBase;
 
 import java.util.*;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
@@ -65,10 +67,23 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
     protected NetworkTopology topology;
     protected Host2NodesMap mapping;
     protected boolean use_fast_verify;
+    protected long stale_interval;
 
     public void setFastVerify(boolean enable) {
         this.use_fast_verify = enable;
+        LOGGER.info(String.format(
+                "update fast verify to:%b",
+                enable
+        ));
         this.configuration.setBoolean(USER_FAST_VERIFY, enable);
+    }
+
+    public void updateStaleInterval(long interval) {
+        LOGGER.info(String.format(
+                "update stale inerval to:%d",
+                interval
+        ));
+        this.stale_interval = interval;
     }
 
     public boolean isFastVerifyEnable() {
@@ -113,10 +128,18 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
         );
 
         // preference
-        Set<StorageType> prefer_type = new HashSet<>(storage_policy.chooseStorageTypes((short) additional));
+        EnumMap<StorageType, Long> prefer_type = storage_policy.chooseStorageTypes((short) additional).stream()
+                .collect(Collectors.groupingBy(
+                        Function.identity(),
+                        () -> new EnumMap<>(StorageType.class),
+                        Collectors.collectingAndThen(
+                                Collectors.summarizingInt((value) -> 1),
+                                IntSummaryStatistics::getSum
+                        )
+                ));
         Comparator<DatanodeStorageInfo> prefer = Comparator.<DatanodeStorageInfo>comparingInt(
                 // prefer suggested storage
-                (storage) -> prefer_type.contains(storage.getStorageType()) ? 0 : 1
+                (storage) -> prefer_type.containsKey(storage.getStorageType()) ? 0 : 1
         )// more free space first, round to 100GB
                 .thenComparingLong((storage) -> -storage.getRemaining() / 1024 * 1024 * 1024 * 100)
                 // less workload first
@@ -129,11 +152,13 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
         Set<String> exclude_expressions = excludes.stream()
                 .map(NodeBase::getPath)
                 .collect(Collectors.toSet());
-        Predicate<String> node_exclude_fileter = (node) -> exclude_expressions.stream().anyMatch(node::startsWith);
+        Predicate<String> node_exclude_filter = (node) -> exclude_expressions.stream().anyMatch(node::startsWith);
         Predicate<DatanodeStorageInfo> storage_filter = (storage) -> {
             // health storage
-            if (storage.getState() == DatanodeStorage.State.FAILED) {
-                return false;
+            switch (storage.getState()) {
+                case FAILED:
+                case READ_ONLY_SHARED:
+                    return false;
             }
 
             // space ok
@@ -142,7 +167,7 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
             }
 
             // right type
-            if (!prefer_type.isEmpty() && !prefer_type.contains(storage.getStorageType())) {
+            if (!prefer_type.isEmpty() && !prefer_type.containsKey(storage.getStorageType())) {
                 return false;
             }
 
@@ -151,6 +176,21 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
 
             return !selected;
         };
+        Predicate<DatanodeDescriptor> datanode_filter = healthNodeTester();
+        Consumer<DatanodeStorageInfo> on_consume = (storage) -> {
+            // mark selected
+            currently_had.add(storage.getDatanodeDescriptor());
+
+            // update storage preference
+            prefer_type.computeIfPresent(storage.getStorageType(), (type, value) -> {
+                value = value - 1;
+                if (value < 0) {
+                    return null;
+                }
+
+                return value;
+            });
+        };
 
         // select
         DatanodeStorageInfo[] selected = sealTogether(
@@ -158,9 +198,11 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                         selection_root,
                         additional,
                         storage_filter,
-                        node_exclude_fileter,
+                        node_exclude_filter,
                         prefer,
-                        currently_had
+                        currently_had,
+                        datanode_filter,
+                        on_consume
                 ).limit(additional),
                 chosen.stream(),
                 return_chosen
@@ -181,7 +223,9 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                             .collect(Collectors.joining(",")),
                     path,
                     writer,
-                    writer.getNetworkLocation(),
+                    Optional.ofNullable(writer)
+                            .map(Node::getNetworkLocation)
+                            .orElse("unknown"),
                     chosen.stream()
                             .map((storage) -> String.format(
                                     "(%s|%s)",
@@ -302,6 +346,14 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
         }
 
         return Collections.emptyList();
+    }
+
+    protected Predicate<DatanodeDescriptor> healthNodeTester() {
+        return (node) -> node.isRegistered()
+                && !node.isDecommissionInProgress()
+                && !node.isDecommissioned()
+                && !node.isDisallowed()
+                && !node.isStale(this.stale_interval);
     }
 
     protected BlockPlacementStatus verifyBlockPlacementFast(DatanodeInfo[] datanodes, int require_replica) {
@@ -450,23 +502,28 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
     }
 
     protected Comparator<DatanodeStorageInfo> selectForDeletion(NetworkTopology constructed) {
+        Comparator<DatanodeStorageInfo> health_first = Comparator.comparingInt(
+                (storage) -> storage.getState() == DatanodeStorage.State.FAILED ? -1 : 0
+        );
+
+        // for same datanode
+        // fail stoarge first,
+        // then less space first
+        Comparator<DatanodeStorageInfo> same_datanode = health_first
+                .thenComparingLong(DatanodeStorageInfo::getRemaining);
+
+        // for same rack
+        // less space first
+        Comparator<DatanodeStorageInfo> same_rack = health_first
+                .thenComparingLong(DatanodeStorageInfo::getRemaining);
+
         return (left, right) -> {
             DatanodeDescriptor left_node = left.getDatanodeDescriptor();
             DatanodeDescriptor right_node = right.getDatanodeDescriptor();
 
             // same datanode
             if (left_node.getDatanodeUuid().equals(right_node.getDatanodeUuid())) {
-                // fail node first
-                if (left.getState() == DatanodeStorage.State.FAILED
-                        && right.getState() != DatanodeStorage.State.FAILED) {
-                    return -1;
-                } else if (right.getState() == DatanodeStorage.State.FAILED) {
-                    return 1;
-                }
-
-                // both not fail,
-                // less usable first
-                return Long.compare(left.getRemaining(), right.getRemaining());
+                return same_datanode.compare(left, right);
             }
 
             // same rack?
@@ -474,7 +531,7 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
             String right_location = right_node.getNetworkLocation();
             if (left_location.equals(right_location)) {
                 // less space first
-                return -Long.compare(left.getRemaining(), right.getRemaining());
+                return same_rack.compare(left, right);
             }
 
             // different rack
@@ -503,7 +560,7 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
 
                 // same parent, compare by location
                 if (left_parent.equals(right_parent)) {
-                    return left_location.compareTo(right_location);
+                    return same_rack.compare(left, right);
                 }
 
                 // rollup
@@ -518,21 +575,24 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                                                        Predicate<DatanodeStorageInfo> storage_filter,
                                                        Predicate<String> node_exclude_filter,
                                                        Comparator<DatanodeStorageInfo> prefer,
-                                                       NetworkTopology currently_had) {
+                                                       NetworkTopology currently_had,
+                                                       Predicate<DatanodeDescriptor> datanode_filter,
+                                                       Consumer<DatanodeStorageInfo> on_consume) {
         final int allocation_limit = expected_selection;
         if (expected_selection <= 0) {
             return Stream.empty();
         }
 
         if (node instanceof DatanodeDescriptor) {
-            return Arrays.stream(((DatanodeDescriptor) node).getStorageInfos())
-                    // health storage
+            return Stream.of((DatanodeDescriptor) node)
+                    .filter(datanode_filter)
+                    .flatMap((datanode) -> Arrays.stream(datanode.getStorageInfos()))
                     .filter(storage_filter)
                     // max available
                     .max(prefer)
                     .map(Stream::of)
                     .orElseGet(Stream::empty)
-                    .peek((storage) -> currently_had.add(storage.getDatanodeDescriptor()))
+                    .peek(on_consume)
                     ;
         }
 
@@ -573,7 +633,9 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                                 storage_filter,
                                 node_exclude_filter,
                                 prefer,
-                                currently_had
+                                currently_had,
+                                datanode_filter,
+                                on_consume
                         ))
                         .flatMap(Function.identity())
                         .limit(expected_selection)
@@ -636,7 +698,9 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
                         storage_filter,
                         node_exclude_filter,
                         prefer,
-                        currently_had
+                        currently_had,
+                        datanode_filter,
+                        on_consume
                 ))
                 .flatMap(Function.identity())
                 .limit(allocation_limit);
@@ -690,5 +754,8 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
         this.use_fast_verify = Optional.ofNullable(this.configuration.get(USER_FAST_VERIFY))
                 .map(Boolean::parseBoolean)
                 .orElse(true);
+        this.stale_interval = configuration.getLong(
+                DFSConfigKeys.DFS_NAMENODE_STALE_DATANODE_INTERVAL_KEY,
+                DFSConfigKeys.DFS_NAMENODE_STALE_DATANODE_INTERVAL_DEFAULT);
     }
 }

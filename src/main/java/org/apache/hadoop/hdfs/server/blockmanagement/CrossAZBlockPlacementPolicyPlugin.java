@@ -7,6 +7,7 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
+import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.http.HttpServer2;
@@ -198,6 +199,13 @@ public class CrossAZBlockPlacementPolicyPlugin extends DNSToSwitchMappingReloadS
                 .map(Boolean::parseBoolean)
                 .orElseGet(crossaz_policy::isFastVerifyEnable);
         crossaz_policy.setFastVerify(fast_verify);
+
+        // reload config
+        Configuration fresh_configuration = new Configuration(this.configuration);
+        fresh_configuration.reloadConfiguration();
+        crossaz_policy.updateStaleInterval(fresh_configuration.getLong(
+                DFSConfigKeys.DFS_NAMENODE_STALE_DATANODE_INTERVAL_KEY,
+                DFSConfigKeys.DFS_NAMENODE_STALE_DATANODE_INTERVAL_DEFAULT));
     }
 
     @Override
