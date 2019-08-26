@@ -28,6 +28,7 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
     public static final Log LOGGER = LogFactory.getLog(CrossAZBlockPlacementPolicy.class);
 
     public static String USER_FAST_VERIFY = "com.sf.crossaz.fast-verify";
+    public static String DO_PLACEMENT_ONLY = "com.sf.crossaz.do-placement-only";
 
     protected static class CrossAZBlockBlockPlacementStatus implements BlockPlacementStatus {
 
@@ -68,8 +69,9 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
     protected Host2NodesMap mapping;
     protected boolean use_fast_verify;
     protected long stale_interval;
+    protected boolean do_placement_only;
 
-    public void setFastVerify(boolean enable) {
+    public void updateFastVerify(boolean enable) {
         this.use_fast_verify = enable;
         LOGGER.info(String.format(
                 "update fast verify to:%b",
@@ -88,6 +90,14 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
 
     public boolean isFastVerifyEnable() {
         return this.use_fast_verify;
+    }
+
+    public void updateDoPlacementOnly(boolean do_placement_only) {
+        this.do_placement_only = do_placement_only;
+    }
+
+    public boolean isDoPlacementOnly() {
+        return this.do_placement_only;
     }
 
     @Override
@@ -270,6 +280,10 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
 
     @Override
     public BlockPlacementStatus verifyBlockPlacement(DatanodeInfo[] datanodes, int require_replica) {
+        if (do_placement_only) {
+            return PLACEMENT_OK;
+        }
+
         if (use_fast_verify) {
             return verifyBlockPlacementFast(datanodes, require_replica);
         }
@@ -757,5 +771,8 @@ public class CrossAZBlockPlacementPolicy extends BlockPlacementPolicy {
         this.stale_interval = configuration.getLong(
                 DFSConfigKeys.DFS_NAMENODE_STALE_DATANODE_INTERVAL_KEY,
                 DFSConfigKeys.DFS_NAMENODE_STALE_DATANODE_INTERVAL_DEFAULT);
+        this.do_placement_only = Optional.ofNullable(this.configuration.get(DO_PLACEMENT_ONLY))
+                .map(Boolean::parseBoolean)
+                .orElse(true);
     }
 }

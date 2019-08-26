@@ -57,6 +57,17 @@
                         ;
                 });
 
+                // attach flip
+                document.querySelector("#flip-do-placement-only").addEventListener('click',(event) => {
+                        event.target.disabled = true;
+                        let path="__RECONFIG_PATH__";
+                        fetch(path+"?reload=true&format=json&do-placement-only="+!event.target.do_placement_only)
+                            .then((response)=>response.json())
+                            .then(render)
+                            .finally(()=>event.target.disabled=false)
+                        ;
+                });
+
                 let response = __JSON_TEMPLATE__;
                 
                 // fallback
@@ -69,6 +80,10 @@
                     document.querySelector("#fast-verify")
                             .innerHTML='Placement Fast Verify Enabled:' + response['fast-verify'];
                     document.querySelector('#flip-fast-verify').verify = response['fast-verify'];
+
+                    document.querySelector("#do-placement-only")
+                            .innerHTML='Do Placement Only:' + response['do-placement-only'];
+                    document.querySelector('#flip-do-placement-only').do_placement_only = response['do-placement-only'];
                 
                     let datanodes = response['datanodes'];
                     if(datanodes.lenth <= 0){
@@ -126,6 +141,10 @@
         <div class='button'>
             <span id='fast-verify'></span>
             <button id='flip-fast-verify'>Flip</button>
+        </div>
+        <div class='button'>
+            <span id='do-placement-only'></span>
+            <button id='flip-do-placement-only'>Flip</button>
         </div>
     </div>
     <table id='datanodes' border='1'>

@@ -198,7 +198,12 @@ public class CrossAZBlockPlacementPolicyPlugin extends DNSToSwitchMappingReloadS
         boolean fast_verify = Optional.ofNullable(request.getParameter("fast-verify"))
                 .map(Boolean::parseBoolean)
                 .orElseGet(crossaz_policy::isFastVerifyEnable);
-        crossaz_policy.setFastVerify(fast_verify);
+        crossaz_policy.updateFastVerify(fast_verify);
+
+        boolean do_placement_only = Optional.ofNullable(request.getParameter("do-placement-only"))
+                .map(Boolean::parseBoolean)
+                .orElseGet(crossaz_policy::isDoPlacementOnly);
+        crossaz_policy.updateDoPlacementOnly(do_placement_only);
 
         // reload config
         Configuration fresh_configuration = new Configuration(this.configuration);
@@ -248,6 +253,7 @@ public class CrossAZBlockPlacementPolicyPlugin extends DNSToSwitchMappingReloadS
 
         // current fast verify state
         content.put("fast-verify", crossaz_policy.isFastVerifyEnable());
+        content.put("do-placement-only", crossaz_policy.isDoPlacementOnly());
 
         return new GsonBuilder()
                 .setPrettyPrinting()
