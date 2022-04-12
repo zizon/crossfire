@@ -9,7 +9,7 @@
     <version>0.0.8-SNAPSHOT</version>
 
     <properties>
-        <hadoop-version>2.7.3</hadoop-version>
+        <hadoop-version>3.2.3</hadoop-version>
         <junit-version>4.12</junit-version>
         <log4j-version>2.11.2</log4j-version>
         <jmh.version>1.21</jmh.version>
